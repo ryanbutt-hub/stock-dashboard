@@ -1690,7 +1690,7 @@ Be honest. Do not be overly positive. If there are real risks, say so clearly.
 End with one sentence on what to watch for that would change your assessment."""
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )

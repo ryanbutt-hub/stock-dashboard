@@ -2425,7 +2425,10 @@ def page_watchlist():
                                     f'<span style="color:#00E676;font-family:IBM Plex Mono;width:40px;font-weight:600">BUY</span>'
                                     f'<span style="color:#69F0AE;font-family:IBM Plex Mono;width:110px">{t["shares"]:,} shares</span>'
                                     f'<span style="color:#4A5568;font-size:0.7rem">{val_str}</span>'
-                                    f'<span style="color:#4A5568;margin-left:auto;font-size:0.7rem">{t.get("date","")}</span>'
+                                    f'</div>'
+                                    f'<div style="font-size:0.68rem;color:#4A5568;margin-top:3px">'
+                                    f'Traded: {t.get("date","Date unknown")}'
+                                    f'</div>'
                                     f'</div>',
                                     unsafe_allow_html=True
                                 )
@@ -2449,7 +2452,10 @@ def page_watchlist():
                                     f'<span style="color:#F56565;font-family:IBM Plex Mono;width:40px;font-weight:600">SELL</span>'
                                     f'<span style="color:#FC8181;font-family:IBM Plex Mono;width:110px">{t["shares"]:,} shares</span>'
                                     f'<span style="color:#4A5568;font-size:0.7rem">{val_str}</span>'
-                                    f'<span style="color:#4A5568;margin-left:auto;font-size:0.7rem">{t.get("date","")}</span>'
+                                    f'</div>'
+                                    f'<div style="font-size:0.68rem;color:#4A5568;margin-top:3px">'
+                                    f'Traded: {t.get("date","Date unknown")}'
+                                    f'</div>'
                                     f'</div>',
                                     unsafe_allow_html=True
                                 )

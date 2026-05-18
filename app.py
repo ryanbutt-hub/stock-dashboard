@@ -2388,23 +2388,73 @@ def page_watchlist():
                             st.caption("No headlines found. Add a Finnhub key in ⚙️ Settings for better coverage.")
 
                     with detail_tabs[3]:
-                        ins_net = insider.get("net_shares", 0)
-                        ins_c   = "#00E676" if ins_net > 0 else ("#F56565" if ins_net < 0 else "#718096")
+                        ins_net  = insider.get("net_shares", 0)
+                        ins_c    = "#00E676" if ins_net > 0 else ("#F56565" if ins_net < 0 else "#718096")
+                        all_txns = insider.get("transactions", [])
+                        buys     = [t for t in all_txns if t.get("is_buy")]
+                        sells    = [t for t in all_txns if not t.get("is_buy")]
                         st.markdown(
-                            f'<div style="color:{ins_c};font-weight:600;font-size:0.85rem;margin-bottom:8px">'
+                            '<div class="advice-prose" style="font-size:0.8rem;margin-bottom:10px">'
+                            '<strong>What does this mean?</strong> Insiders are company executives and large shareholders. '
+                            'When they <span style="color:#00E676">BUY</span> with their own money it can signal confidence. '
+                            'When they <span style="color:#F56565">SELL</span> it is less meaningful — '
+                            'they often sell for personal reasons like taxes or diversification.'
+                            '</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<div style="background:#141E30;border-radius:8px;padding:10px 14px;'
+                            f'margin-bottom:12px;font-weight:600;font-size:0.85rem;color:{ins_c}">'
                             f'{insider.get("summary","No insider data.")}</div>',
                             unsafe_allow_html=True
                         )
-                        for t in insider.get("transactions", [])[:6]:
-                            tc = "#00E676" if t.get("is_buy") else "#F56565"
+                        if buys:
+                            buy_count = len(buys)
                             st.markdown(
-                                f'<div style="display:flex;gap:8px;font-size:0.75rem;padding:5px 0;border-bottom:1px solid #141E30">'
-                                f'<span style="color:#718096;width:130px">{t["insider"][:20]}</span>'
-                                f'<span style="color:{tc};font-family:IBM Plex Mono;width:45px;font-weight:600">{t["type"]}</span>'
-                                f'<span style="color:#A0AEC0;font-family:IBM Plex Mono">{t["shares"]:,} shares</span>'
-                                f'</div>',
+                                f'<div style="font-family:Syne,sans-serif;font-size:0.72rem;font-weight:700;'
+                                f'color:#00E676;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">'
+                                f'BUYING — {buy_count} transaction{"s" if buy_count>1 else ""}</div>',
                                 unsafe_allow_html=True
                             )
+                            for t in buys:
+                                val_str = f'${t["value"]:,.0f}' if t.get("value") else ""
+                                st.markdown(
+                                    f'<div style="display:flex;gap:8px;font-size:0.75rem;padding:5px 0;'
+                                    f'border-bottom:1px solid #141E30">'
+                                    f'<span style="color:#718096;width:150px">{t["insider"][:22]}</span>'
+                                    f'<span style="color:#00E676;font-family:IBM Plex Mono;width:40px;font-weight:600">BUY</span>'
+                                    f'<span style="color:#69F0AE;font-family:IBM Plex Mono;width:110px">{t["shares"]:,} shares</span>'
+                                    f'<span style="color:#4A5568;font-size:0.7rem">{val_str}</span>'
+                                    f'<span style="color:#4A5568;margin-left:auto;font-size:0.7rem">{t.get("date","")}</span>'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
+                        else:
+                            st.markdown('<div style="color:#4A5568;font-size:0.78rem;margin-bottom:8px">No insider buying recently.</div>', unsafe_allow_html=True)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if sells:
+                            sell_count = len(sells)
+                            st.markdown(
+                                f'<div style="font-family:Syne,sans-serif;font-size:0.72rem;font-weight:700;'
+                                f'color:#F56565;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px">'
+                                f'SELLING — {sell_count} transaction{"s" if sell_count>1 else ""}</div>',
+                                unsafe_allow_html=True
+                            )
+                            for t in sells:
+                                val_str = f'${t["value"]:,.0f}' if t.get("value") else ""
+                                st.markdown(
+                                    f'<div style="display:flex;gap:8px;font-size:0.75rem;padding:5px 0;'
+                                    f'border-bottom:1px solid #141E30">'
+                                    f'<span style="color:#718096;width:150px">{t["insider"][:22]}</span>'
+                                    f'<span style="color:#F56565;font-family:IBM Plex Mono;width:40px;font-weight:600">SELL</span>'
+                                    f'<span style="color:#FC8181;font-family:IBM Plex Mono;width:110px">{t["shares"]:,} shares</span>'
+                                    f'<span style="color:#4A5568;font-size:0.7rem">{val_str}</span>'
+                                    f'<span style="color:#4A5568;margin-left:auto;font-size:0.7rem">{t.get("date","")}</span>'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
+                        else:
+                            st.markdown('<div style="color:#4A5568;font-size:0.78rem">No insider selling recently.</div>', unsafe_allow_html=True)
 
                     with detail_tabs[4]:
                         st.markdown("**Score breakdown — why it got this rating:**")

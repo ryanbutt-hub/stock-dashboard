@@ -34,6 +34,42 @@ try:
 except ImportError:
     HAS_FINNHUB = False
 
+try:
+    import alpaca_trade_api as alpaca
+    HAS_ALPACA = True
+except ImportError:
+    HAS_ALPACA = False
+
+import os, pathlib
+
+# ── Config file — persists API keys and settings across restarts ──
+CONFIG_PATH = pathlib.Path.home() / "stock-dashboard" / "advisor_config.json"
+
+def load_config() -> dict:
+    """Load saved settings from config file. Returns defaults if file missing."""
+    defaults = {
+        "anthropic_key": "", "finnhub_key": "",
+        "alpaca_key": "", "alpaca_secret": "",
+        "account_size": 10000.0, "max_risk_pct": 1.0,
+        "risk_weights": {"technical":40,"fundamental":30,"sentiment":20,"performance":10},
+    }
+    try:
+        if CONFIG_PATH.exists():
+            saved = json.loads(CONFIG_PATH.read_text())
+            defaults.update(saved)
+    except Exception:
+        pass
+    return defaults
+
+def save_config(cfg: dict):
+    """Save settings to config file so they survive restarts."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    except Exception as e:
+        st.error(f"Could not save config: {e}")
+
+
 # ─────────────────────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
@@ -372,6 +408,34 @@ div[data-testid="stForm"] {
 # ─────────────────────────────────────────────────────────────
 DB = "advisor_v2.db"
 
+def migrate_old_watchlist():
+    """
+    One-time migration: copy watchlist from old database files
+    into the new advisor_v2.db so tickers don't disappear.
+    """
+    import os
+    old_dbs = ["advisor_journal.db", "trade_journal.db"]
+    for old_db in old_dbs:
+        if not os.path.exists(old_db):
+            continue
+        try:
+            old_conn = sqlite3.connect(old_db)
+            old_wl   = pd.read_sql(
+                "SELECT ticker FROM watchlist", old_conn
+            )
+            old_conn.close()
+            if old_wl.empty:
+                continue
+            new_conn = sqlite3.connect(DB)
+            for tk in old_wl["ticker"].tolist():
+                new_conn.execute(
+                    "INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (tk,)
+                )
+            new_conn.commit()
+            new_conn.close()
+        except Exception:
+            pass
+
 def init_db():
     conn = sqlite3.connect(DB)
     c = conn.cursor()
@@ -440,20 +504,26 @@ def init_db():
     conn.close()
 
 init_db()
+migrate_old_watchlist()
 
 # ─────────────────────────────────────────────────────────────
 #  SESSION STATE
 # ─────────────────────────────────────────────────────────────
+# Load saved config once per session
+_cfg = load_config()
+
 DEFAULTS = {
     "page":              "briefing",
     "paused":            False,
     "refresh_interval":  60,
     "last_refresh":      0,
-    "account_size":      10000.0,
-    "max_risk_pct":      1.0,
-    "anthropic_key":     "",
-    "finnhub_key":       "",
-    "risk_weights":      {"technical":40,"fundamental":30,"sentiment":20,"performance":10},
+    "account_size":      _cfg.get("account_size", 10000.0),
+    "max_risk_pct":      _cfg.get("max_risk_pct", 1.0),
+    "anthropic_key":     _cfg.get("anthropic_key", ""),
+    "finnhub_key":       _cfg.get("finnhub_key", ""),
+    "alpaca_key":        _cfg.get("alpaca_key", ""),
+    "alpaca_secret":     _cfg.get("alpaca_secret", ""),
+    "risk_weights":      _cfg.get("risk_weights", {"technical":40,"fundamental":30,"sentiment":20,"performance":10}),
     "scanner_results":   [],
     "scanner_last_run":  0,
     "all_results":       [],
@@ -876,6 +946,192 @@ def calc_indicators(df):
     else:
         df["RS"] = 100.0
     return df
+
+
+# ─────────────────────────────────────────────────────────────
+#  FRED — Federal Reserve Economic Data (free macro indicators)
+# ─────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600)
+def get_fred_macro() -> dict:
+    """
+    Pull key macro indicators from the Federal Reserve (FRED).
+    Completely free — no API key needed for these public endpoints.
+    Covers: Fed Funds Rate, CPI inflation, 10yr yield, unemployment.
+    """
+    BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+    results = {}
+
+    indicators = {
+        "fed_rate":     ("FEDFUNDS",    "Fed Funds Rate",     "%"),
+        "inflation":    ("CPIAUCSL",    "CPI Inflation",      "%"),
+        "yield_10yr":   ("DGS10",       "10-Year Treasury",   "%"),
+        "yield_2yr":    ("DGS2",        "2-Year Treasury",    "%"),
+        "unemployment": ("UNRATE",      "Unemployment Rate",  "%"),
+        "sp500_pe":     ("MULTPL/SP500_PE_RATIO_MONTH", "S&P 500 P/E Ratio", "x"),
+    }
+
+    for key, (series_id, label, unit) in indicators.items():
+        try:
+            url = f"{BASE}{series_id}"
+            df  = pd.read_csv(url, parse_dates=["DATE"])
+            df  = df.dropna()
+            if df.empty:
+                continue
+            latest = float(df.iloc[-1, 1])
+            prev   = float(df.iloc[-2, 1]) if len(df) >= 2 else latest
+            change = latest - prev
+            results[key] = {
+                "label":  label,
+                "value":  round(latest, 2),
+                "change": round(change, 2),
+                "unit":   unit,
+            }
+        except Exception:
+            pass
+
+    # Yield curve spread (10yr - 2yr) — negative = inverted = recession warning
+    if "yield_10yr" in results and "yield_2yr" in results:
+        spread = results["yield_10yr"]["value"] - results["yield_2yr"]["value"]
+        results["yield_spread"] = {
+            "label":  "Yield Curve (10yr - 2yr)",
+            "value":  round(spread, 2),
+            "change": 0,
+            "unit":   "%",
+        }
+
+    # Plain English interpretation
+    interpretations = []
+    if "fed_rate" in results:
+        r = results["fed_rate"]["value"]
+        if r >= 5.0:
+            interpretations.append(f"Fed rate at {r}% — high rates make borrowing expensive and weigh on growth stocks.")
+        elif r >= 3.0:
+            interpretations.append(f"Fed rate at {r}% — moderate rates, neutral impact on markets.")
+        else:
+            interpretations.append(f"Fed rate at {r}% — low rates support growth and risk assets.")
+
+    if "inflation" in results:
+        # CPI is a level, calculate rough YoY from series
+        interpretations.append("Inflation data loaded — high inflation typically leads to higher rates which pressure valuations.")
+
+    if "yield_spread" in results:
+        s = results["yield_spread"]["value"]
+        if s < 0:
+            interpretations.append(f"⚠️ Yield curve is INVERTED ({s:+.2f}%) — historically a recession warning signal. Be defensive.")
+        elif s < 0.5:
+            interpretations.append(f"Yield curve is flat ({s:+.2f}%) — caution warranted, economy may be slowing.")
+        else:
+            interpretations.append(f"Yield curve is normal ({s:+.2f}%) — positive signal for economic growth.")
+
+    results["interpretation"] = interpretations
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
+#  ALPACA — Portfolio sync (read-only, analysis only)
+# ─────────────────────────────────────────────────────────────
+
+def get_alpaca_portfolio() -> list:
+    """
+    Fetch current positions from Alpaca account.
+    Read-only — used for portfolio sync only, not for placing trades.
+    Returns list of positions in the same format as get_portfolio_positions().
+    """
+    key    = st.session_state.get("alpaca_key", "")
+    secret = st.session_state.get("alpaca_secret", "")
+    if not key or not secret:
+        return []
+    if not HAS_ALPACA:
+        return []
+    try:
+        api = alpaca.REST(key, secret, base_url="https://paper-api.alpaca.markets")
+        positions = api.list_positions()
+        results = []
+        for p in positions:
+            results.append({
+                "ticker":        p.symbol,
+                "shares":        float(p.qty),
+                "entry_price":   float(p.avg_entry_price),
+                "current_price": float(p.current_price),
+                "market_value":  float(p.market_value),
+                "pnl":           float(p.unrealized_pl),
+                "pnl_pct":       float(p.unrealized_plpc) * 100,
+                "source":        "alpaca",
+            })
+        return results
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────────
+#  ETORO CSV IMPORTER
+# ─────────────────────────────────────────────────────────────
+
+def parse_etoro_csv(uploaded_file) -> list:
+    """
+    Parse an eToro portfolio export CSV and return a list of positions.
+    eToro export columns vary — this handles the most common formats.
+
+    How to export from eToro:
+    1. Open eToro app or website
+    2. Go to Portfolio
+    3. Tap the three dots (⋯) menu top right
+    4. Select 'Export' or 'Download statement'
+    5. Choose 'Positions' and download as CSV
+    """
+    try:
+        df = pd.read_csv(uploaded_file)
+        df.columns = [c.strip().lower().replace(" ","_") for c in df.columns]
+
+        positions = []
+        # Map common eToro column names
+        ticker_cols  = ["ticker","symbol","instrument","asset","stock"]
+        shares_cols  = ["units","shares","quantity","amount","qty"]
+        price_cols   = ["open_rate","avg_open","entry_price","open_price","avg_price"]
+        date_cols    = ["open_date","entry_date","date","opened"]
+
+        def find_col(df, candidates):
+            for c in candidates:
+                if c in df.columns: return c
+            return None
+
+        tc = find_col(df, ticker_cols)
+        sc = find_col(df, shares_cols)
+        pc = find_col(df, price_cols)
+        dc = find_col(df, date_cols)
+
+        if not tc:
+            return []
+
+        for _, row in df.iterrows():
+            try:
+                ticker = str(row[tc]).upper().strip()
+                # Skip non-stock rows
+                if not ticker or ticker in ["NAN","TOTAL","","BALANCE"]:
+                    continue
+                # Clean ticker — remove eToro suffixes like /USD
+                ticker = ticker.split("/")[0].split(".")[0]
+
+                shares = float(row[sc]) if sc and pd.notna(row[sc]) else 1.0
+                price  = float(row[pc]) if pc and pd.notna(row[pc]) else 0.0
+                date   = str(row[dc])[:10] if dc and pd.notna(row[dc]) else str(datetime.date.today())
+
+                if price > 0 and shares > 0:
+                    positions.append({
+                        "ticker":      ticker,
+                        "shares":      shares,
+                        "entry_price": price,
+                        "entry_date":  date,
+                        "source":      "etoro_import",
+                    })
+            except Exception:
+                continue
+
+        return positions
+    except Exception as e:
+        st.error(f"Could not parse eToro CSV: {e}")
+        return []
 
 # ─────────────────────────────────────────────────────────────
 #  SCORING ENGINE
@@ -1354,13 +1610,11 @@ def chart_pnl_calendar(journal_df):
 # ─────────────────────────────────────────────────────────────
 
 PAGES = [
-    ("briefing",     "🌅 Morning Briefing"),
-    ("portfolio",    "💼 My Portfolio"),
-    ("opportunities","🚦 Opportunities"),
-    ("scanner",      "🔭 Scanner"),
-    ("planner",      "📐 Trade Planner"),
-    ("journal",      "📓 Journal"),
-    ("settings",     "⚙️ Settings"),
+    ("briefing",   "🌅 Morning Briefing"),
+    ("portfolio",  "💼 My Portfolio"),
+    ("watchlist",  "🚦 Watchlist"),
+    ("scanner",    "🔭 Scanner"),
+    ("settings",   "⚙️ Settings"),
 ]
 
 def render_nav():
@@ -1491,6 +1745,35 @@ def page_briefing():
                 unsafe_allow_html=True
             )
 
+    # ── FRED Macro Panel ──
+    st.markdown('<div class="section-title">📊 Macro Environment — Federal Reserve Data</div>',
+                unsafe_allow_html=True)
+    st.caption("Big-picture economic conditions that affect all stocks. Updated daily from the US Federal Reserve.")
+    fred = get_fred_macro()
+    if fred:
+        fred_keys = ["fed_rate","yield_10yr","yield_2yr","yield_spread","unemployment"]
+        fred_cols = st.columns(len([k for k in fred_keys if k in fred]))
+        col_i = 0
+        for key in fred_keys:
+            if key not in fred: continue
+            d = fred[key]
+            chg_c = "#00E676" if d["change"] >= 0 else "#F56565"
+            fred_cols[col_i].markdown(
+                f'<div class="metric-tile">' +
+                f'<div class="mt-label">{d["label"]}</div>' +
+                f'<div class="mt-value">{d["value"]}{d["unit"]}</div>' +
+                (f'<div style="font-size:0.7rem;color:{chg_c};margin-top:3px">{d["change"]:+.2f}{d["unit"]} vs prior</div>' if d["change"] != 0 else "") +
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            col_i += 1
+        for interp in fred.get("interpretation", []):
+            cls = "alert-warn" if "⚠️" in interp else "alert-info"
+            st.markdown(f'<div class="{cls}" style="margin:4px 0;font-size:0.82rem">{interp}</div>',
+                        unsafe_allow_html=True)
+    else:
+        st.caption("Macro data temporarily unavailable — will retry on next refresh.")
+
     # ── Earnings calendar ──
     st.markdown('<div class="section-title">📅 Earnings Coming Up</div>', unsafe_allow_html=True)
     st.caption("Stocks can move sharply after earnings announcements — be prepared.")
@@ -1588,9 +1871,83 @@ def page_portfolio():
                     st.success(f"Added {tk_in} — {shares_in} shares at ${price_in:.2f}")
                     st.rerun()
 
+    # ── eToro CSV Import ──
+    with st.expander("📥 Import from eToro (CSV)", expanded=False):
+        st.markdown(
+            '<div class="advice-prose">' +
+            '<strong>How to export from eToro:</strong><br>' +
+            '1. Open eToro app or website<br>' +
+            '2. Go to <strong>Portfolio</strong><br>' +
+            '3. Tap the <strong>⋯ menu</strong> (top right)<br>' +
+            '4. Select <strong>Export positions</strong> or <strong>Download statement</strong><br>' +
+            '5. Choose <strong>Positions</strong> and download as CSV<br>' +
+            '6. Upload that file below</div>',
+            unsafe_allow_html=True
+        )
+        uploaded = st.file_uploader("Upload eToro CSV", type=["csv"], key="etoro_upload")
+        if uploaded:
+            parsed = parse_etoro_csv(uploaded)
+            if parsed:
+                st.success(f"Found {len(parsed)} positions in your eToro export:")
+                preview_df = pd.DataFrame([{"Ticker":p["ticker"],"Shares":p["shares"],
+                    "Entry Price":f'${p["entry_price"]:.2f}',"Date":p["entry_date"]} for p in parsed])
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                if st.button("✅ Import all these positions", type="primary"):
+                    conn = db()
+                    imported = 0
+                    for p in parsed:
+                        try:
+                            conn.execute("""
+                                INSERT INTO portfolio
+                                (ticker,shares,entry_price,entry_date,notes,status)
+                                VALUES (?,?,?,?,?,'open')
+                            """, (p["ticker"], p["shares"], p["entry_price"],
+                                  p["entry_date"], "Imported from eToro"))
+                            imported += 1
+                        except Exception:
+                            pass
+                    conn.commit(); conn.close()
+                    st.success(f"Imported {imported} positions successfully!")
+                    st.rerun()
+            else:
+                st.error("Could not read positions from this file. Make sure it is the eToro positions export (not statement).")
+
+    # ── Alpaca sync (if connected) ──
+    alpaca_positions = get_alpaca_portfolio()
+    if alpaca_positions:
+        with st.expander(f"🔗 Alpaca Portfolio ({len(alpaca_positions)} positions)", expanded=False):
+            st.caption("Live positions from your Alpaca account (read-only)")
+            ap_df = pd.DataFrame([{
+                "Ticker": p["ticker"],
+                "Shares": p["shares"],
+                "Entry": f'${p["entry_price"]:.2f}',
+                "Current": f'${p["current_price"]:.2f}',
+                "P&L": f'{"+" if p["pnl"]>=0 else ""}${p["pnl"]:.2f} ({p["pnl_pct"]:+.1f}%)',
+            } for p in alpaca_positions])
+            st.dataframe(ap_df, use_container_width=True, hide_index=True)
+            if st.button("Sync Alpaca positions to portfolio tracker"):
+                conn = db()
+                synced = 0
+                for p in alpaca_positions:
+                    existing = pd.read_sql(
+                        "SELECT id FROM portfolio WHERE ticker=? AND status='open'",
+                        conn, params=(p["ticker"],)
+                    )
+                    if existing.empty:
+                        conn.execute("""
+                            INSERT INTO portfolio
+                            (ticker,shares,entry_price,entry_date,notes,status)
+                            VALUES (?,?,?,?,?,'open')
+                        """, (p["ticker"], p["shares"], p["entry_price"],
+                              str(datetime.date.today()), "Synced from Alpaca"))
+                        synced += 1
+                conn.commit(); conn.close()
+                st.success(f"Synced {synced} new positions")
+                st.rerun()
+
     positions = get_portfolio_positions()
     if not positions:
-        st.info("No open positions yet. Add your first position above.")
+        st.info("No open positions yet. Add your first position above, or import from eToro.")
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
@@ -1741,22 +2098,22 @@ def page_portfolio():
 #  PAGE: OPPORTUNITIES (Traffic Light List)
 # ─────────────────────────────────────────────────────────────
 
-def page_opportunities():
+def page_watchlist():
     st.markdown('<div class="page-content">', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">🚦 Opportunities</div>'
-                '<div class="page-subtitle">Your watchlist — scored, colour-coded, and explained in plain English</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-title">🚦 Watchlist</div>'
+        '<div class="page-subtitle">Your tracked stocks — scored, analysed, and explained in plain English</div>',
+        unsafe_allow_html=True
+    )
 
-    # Manage watchlist
-    wc1, wc2 = st.columns([3,1])
-    with wc1:
-        new_tk = st.text_input("Add to watchlist:", placeholder="e.g. AAPL", label_visibility="collapsed").upper().strip()
-    with wc2:
-        if st.button("➕ Add", use_container_width=True) and new_tk:
-            conn = db()
-            conn.execute("INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (new_tk,))
-            conn.commit(); conn.close()
-            st.success(f"Added {new_tk}"); st.rerun()
+    # ── Add / remove tickers ──
+    wc1, wc2, wc3 = st.columns([3, 1, 2])
+    new_tk = wc1.text_input("Add a stock:", placeholder="e.g. AAPL", label_visibility="collapsed").upper().strip()
+    if wc2.button("➕ Add", use_container_width=True) and new_tk:
+        conn = db()
+        conn.execute("INSERT OR IGNORE INTO watchlist (ticker) VALUES (?)", (new_tk,))
+        conn.commit(); conn.close()
+        st.success(f"Added {new_tk}"); st.rerun()
 
     conn = db()
     wl = pd.read_sql("SELECT ticker FROM watchlist ORDER BY ticker", conn)
@@ -1764,38 +2121,33 @@ def page_opportunities():
     watchlist = wl["ticker"].tolist() if not wl.empty else []
 
     if not watchlist:
-        st.info("Add stocks to your watchlist above to see your traffic light analysis.")
+        st.info("Add stocks above to begin. Try: NVDA, AAPL, MSFT, SPY")
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
-    # Show watchlist chips with remove buttons
-    chips = " ".join([f'<span class="pill pill-blue">{t}</span>' for t in watchlist])
-    st.markdown(chips, unsafe_allow_html=True)
-    remove_tk = st.selectbox("Remove from watchlist:", ["—"]+watchlist, label_visibility="collapsed")
-    if remove_tk != "—":
+    remove_tk = wc3.selectbox("Remove:", ["— keep all —"] + watchlist, label_visibility="collapsed")
+    if remove_tk != "— keep all —":
         conn = db()
         conn.execute("DELETE FROM watchlist WHERE ticker=?", (remove_tk,))
         conn.commit(); conn.close()
         st.rerun()
-
-    st.markdown('<div class="section-title">Scanning your watchlist…</div>', unsafe_allow_html=True)
 
     if st.session_state.paused:
         st.warning("⏸ Scanning paused — enable in ⚙️ Settings")
         st.markdown('</div>', unsafe_allow_html=True)
         return
 
-    fg   = get_fear_greed()
-    vix  = get_vix()
+    fg     = get_fear_greed()
+    vix    = get_vix()
     regime = get_market_regime()
 
-    # Load all stocks
+    # ── Load all stocks ──
     results = []
     prog = st.progress(0, text="Loading watchlist…")
     for i, tk in enumerate(watchlist):
         prog.progress((i+1)/len(watchlist), text=f"Analysing {tk}…")
-        df      = get_prices(tk)
-        df      = calc_indicators(df.copy()) if df is not None else None
+        df_raw  = get_prices(tk)
+        df      = calc_indicators(df_raw.copy()) if df_raw is not None else None
         info    = get_info(tk)
         opts    = get_options(tk)
         analyst = get_analyst(tk)
@@ -1804,308 +2156,289 @@ def page_opportunities():
         risk    = score_stock(tk, df, info, opts, fg, vix)
         sigs    = detect_sell_signals(tk, df, info, analyst, insider)
         ed      = get_earnings_date(tk)
-        results.append({"ticker":tk,"df":df,"info":info,"opts":opts,
-                         "analyst":analyst,"insider":insider,"news":news,
-                         "risk":risk,"sell_sigs":sigs,"earnings":ed})
+        results.append({
+            "ticker": tk, "df": df, "info": info, "opts": opts,
+            "analyst": analyst, "insider": insider, "news": news,
+            "risk": risk, "sell_sigs": sigs, "earnings": ed
+        })
         time.sleep(0.15)
     prog.empty()
 
-    # Sort into traffic light groups
-    green  = sorted([r for r in results if r["risk"]["score"]>=80],  key=lambda x: -x["risk"]["score"])
-    yellow = sorted([r for r in results if 50<=r["risk"]["score"]<80], key=lambda x: -x["risk"]["score"])
-    red    = sorted([r for r in results if r["risk"]["score"]<50],   key=lambda x: -x["risk"]["score"])
+    # ── Traffic light summary ──
+    green  = sorted([r for r in results if r["risk"]["score"] >= 80],  key=lambda x: -x["risk"]["score"])
+    yellow = sorted([r for r in results if 50 <= r["risk"]["score"] < 80], key=lambda x: -x["risk"]["score"])
+    red    = sorted([r for r in results if r["risk"]["score"] < 50],   key=lambda x: -x["risk"]["score"])
 
-    # Summary
     st.markdown(
         f'<div style="display:flex;gap:10px;margin-bottom:20px">'
-        f'<div style="flex:1;background:rgba(0,230,118,0.07);border:1px solid rgba(0,230,118,0.2);border-radius:10px;padding:14px;text-align:center">'
+        f'<div style="flex:1;background:rgba(0,230,118,0.07);border:1px solid rgba(0,230,118,0.2);'
+        f'border-radius:10px;padding:14px;text-align:center">'
         f'<div style="font-family:Syne,sans-serif;font-size:2rem;font-weight:800;color:#00E676">{len(green)}</div>'
         f'<div style="font-size:0.68rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em">Low Risk</div></div>'
-        f'<div style="flex:1;background:rgba(246,173,85,0.07);border:1px solid rgba(246,173,85,0.2);border-radius:10px;padding:14px;text-align:center">'
+        f'<div style="flex:1;background:rgba(246,173,85,0.07);border:1px solid rgba(246,173,85,0.2);'
+        f'border-radius:10px;padding:14px;text-align:center">'
         f'<div style="font-family:Syne,sans-serif;font-size:2rem;font-weight:800;color:#F6AD55">{len(yellow)}</div>'
         f'<div style="font-size:0.68rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em">Medium Risk</div></div>'
-        f'<div style="flex:1;background:rgba(245,101,101,0.07);border:1px solid rgba(245,101,101,0.2);border-radius:10px;padding:14px;text-align:center">'
+        f'<div style="flex:1;background:rgba(245,101,101,0.07);border:1px solid rgba(245,101,101,0.2);'
+        f'border-radius:10px;padding:14px;text-align:center">'
         f'<div style="font-family:Syne,sans-serif;font-size:2rem;font-weight:800;color:#F56565">{len(red)}</div>'
         f'<div style="font-size:0.68rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em">High Risk</div></div>'
         f'</div>',
         unsafe_allow_html=True
     )
 
-    def render_stock_cards(group, header, note, color):
+    def render_cards(group, header_color, header_label, note):
         if not group: return
-        st.markdown(f'<div style="font-family:Syne,sans-serif;font-size:1rem;font-weight:700;'
-                    f'color:{color};margin:20px 0 4px 0">{header}</div>'
-                    f'<div style="font-size:0.78rem;color:#4A5568;margin-bottom:12px">{note}</div>',
-                    unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="font-family:Syne,sans-serif;font-size:1rem;font-weight:700;'
+            f'color:{header_color};margin:24px 0 4px 0">{header_label}</div>'
+            f'<div style="font-size:0.78rem;color:#4A5568;margin-bottom:14px">{note}</div>',
+            unsafe_allow_html=True
+        )
+
         for r in group:
-            tk   = r["ticker"]
-            risk = r["risk"]
-            info = r["info"]
-            df   = r["df"]
-            name = info.get("name", tk)
-            price = info.get("price") or (float(df.iloc[-1]["Close"]) if df is not None and not df.empty else None)
-            chg_pct = 0
+            tk      = r["ticker"]
+            risk    = r["risk"]
+            info    = r["info"]
+            df      = r["df"]
+            analyst = r["analyst"]
+            insider = r["insider"]
+            news    = r["news"]
+            sigs    = r["sell_sigs"]
+            ed      = r["earnings"]
+            name    = info.get("name", tk)
+            price   = info.get("price") or (float(df.iloc[-1]["Close"]) if df is not None and not df.empty else None)
+            chg_pct = 0.0
             if df is not None and len(df) > 1:
-                chg_pct = float((df.iloc[-1]["Close"]/df.iloc[-2]["Close"]-1)*100)
+                chg_pct = float((df.iloc[-1]["Close"] / df.iloc[-2]["Close"] - 1) * 100)
             chg_color = "#00E676" if chg_pct >= 0 else "#F56565"
+            color = risk["color"]
 
             with st.container():
                 st.markdown(f'<div class="{risk["css"]}">', unsafe_allow_html=True)
 
-                # Header row
-                hc1,hc2,hc3 = st.columns([4,2,2])
-                with hc1:
+                # ── TOP BAR: ticker, score, price ──
+                top1, top2, top3 = st.columns([4, 2, 2])
+                with top1:
                     st.markdown(
-                        f'<div style="font-family:Syne,sans-serif;font-size:1.2rem;font-weight:800;color:{risk["color"]}">{tk}</div>'
-                        f'<div style="font-size:0.78rem;color:#4A5568">{name} · {info.get("sector","")}</div>',
+                        f'<div style="font-family:Syne,sans-serif;font-size:1.25rem;'
+                        f'font-weight:800;color:{color}">{tk}</div>'
+                        f'<div style="font-size:0.78rem;color:#4A5568;margin-top:1px">'
+                        f'{name} · {info.get("sector","")}</div>',
                         unsafe_allow_html=True
                     )
-                with hc2:
+                with top2:
                     st.markdown(
                         f'<div style="text-align:center">'
-                        f'<div class="score-big" style="color:{risk["color"]}">{risk["score"]:.0f}</div>'
-                        f'<div class="score-label" style="color:{risk["color"]}">{risk["label"]}</div>'
+                        f'<div class="score-big" style="color:{color}">{risk["score"]:.0f}</div>'
+                        f'<div class="score-label" style="color:{color}">{risk["label"]}</div>'
                         f'</div>',
                         unsafe_allow_html=True
                     )
-                with hc3:
+                with top3:
                     if price:
                         st.markdown(
                             f'<div style="text-align:right">'
                             f'<div style="font-family:IBM Plex Mono;font-size:1.3rem;color:#EDF2F7">${price:.2f}</div>'
-                            f'<div style="color:{chg_color};font-size:0.8rem">{"▲" if chg_pct>=0 else "▼"} {abs(chg_pct):.2f}% today</div>'
+                            f'<div style="color:{chg_color};font-size:0.8rem">'
+                            f'{"▲" if chg_pct>=0 else "▼"} {abs(chg_pct):.2f}% today</div>'
                             f'</div>',
                             unsafe_allow_html=True
                         )
 
-                # Sub-score pills
+                # ── SUB-SCORE PILLS ──
                 t_lbl = f"Chart {risk['t']}/100"
                 f_lbl = f"Finances {risk['f']}/100"
                 s_lbl = f"Mood {risk['s']}/100"
-                p_lbl = f"Track record {risk['p']}/100"
-                st.markdown(
-                    pill(t_lbl,"blue") + pill(f_lbl,"blue") +
-                    pill(s_lbl,"blue") + pill(p_lbl,"blue"),
-                    unsafe_allow_html=True
-                )
-
-                # Earnings warning
-                ed = r["earnings"]
+                p_lbl = f"Track rec {risk['p']}/100"
+                pills_html = (pill(t_lbl,"blue") + pill(f_lbl,"blue") +
+                              pill(s_lbl,"blue") + pill(p_lbl,"blue"))
                 if ed["days"] is not None and 0 <= ed["days"] <= 14:
-                    earn_pill = pill(f"⚡ Earnings in {ed['days']}d ({ed['date']})", "amber")
-                    st.markdown(
-                        f'<div style="margin:6px 0">{earn_pill}</div>',
-                        unsafe_allow_html=True
-                    )
+                    earn_txt = f"⚡ Earnings {ed['days']}d"
+                    pills_html += pill(earn_txt, "amber")
+                st.markdown(pills_html, unsafe_allow_html=True)
 
-                # Sell signals
-                if r["sell_sigs"]:
+                # ── SELL ALERTS ──
+                if sigs:
                     st.markdown(
-                        '<div style="font-family:Syne,sans-serif;font-size:0.72rem;font-weight:700;'
-                        'color:#F6AD55;text-transform:uppercase;letter-spacing:0.08em;margin:8px 0 4px 0">'
-                        f'⚠️ {len(r["sell_sigs"])} exit signal{"s" if len(r["sell_sigs"])>1 else ""}</div>',
+                        f'<div style="font-family:Syne,sans-serif;font-size:0.72rem;'
+                        f'font-weight:700;color:#F6AD55;text-transform:uppercase;'
+                        f'letter-spacing:0.08em;margin:8px 0 4px 0">'
+                        f'⚠️ {len(sigs)} exit signal{"s" if len(sigs)>1 else ""} detected</div>',
                         unsafe_allow_html=True
                     )
-                    for sig in r["sell_sigs"][:2]:
+                    for sig in sigs[:2]:
                         uc = "#F56565" if sig["urgency"]=="CRITICAL" else "#F6AD55"
                         st.markdown(
-                            f'<div class="alert-warn" style="margin:3px 0;padding:8px 12px">'
-                            f'<span style="color:{uc};font-size:0.78rem">{sig["type"]}</span>'
+                            f'<div class="alert-warn" style="padding:7px 11px;margin:3px 0">'
+                            f'<span style="color:{uc};font-weight:600;font-size:0.78rem">'
+                            f'{sig["type"]}</span>'
                             f' — <span style="font-size:0.78rem">{sig["msg"]}</span></div>',
                             unsafe_allow_html=True
                         )
 
-                # Expandable detail sections
-                with st.expander("📊 Full chart + indicators"):
-                    ct1,ct2 = st.tabs(["Price Chart","Score Breakdown"])
-                    with ct1:
-                        st.plotly_chart(chart_price(df, tk), use_container_width=True, key=f"chart_{tk}")
-                    with ct2:
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                # ── TWO-COLUMN DETAIL LAYOUT ──
+                left_col, right_col = st.columns([5, 5])
+
+                with left_col:
+                    st.markdown('<div style="font-size:0.68rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">Key Metrics</div>', unsafe_allow_html=True)
+
+                    if df is not None and not df.empty:
+                        last = df.iloc[-1]
+                        metric_rows = [
+                            ("P/E Ratio",        f'{info.get("pe"):.1f}' if info.get("pe") else "N/A",       "Price vs earnings — lower = cheaper"),
+                            ("Forward P/E",      f'{info.get("fwd_pe"):.1f}' if info.get("fwd_pe") else "N/A","Based on expected earnings"),
+                            ("Momentum (RSI)",   f'{float(last.get("RSI",50)):.0f}',                          "30=oversold, 70=overbought"),
+                            ("MACD",             f'{"✅ Bullish" if float(last.get("MACD",0))>float(last.get("MACD_Signal",0)) else "❌ Bearish"}', "Momentum direction"),
+                            ("Volume",           f'{float(last.get("VolRatio",1)):.1f}× avg',                 "Trading activity vs normal"),
+                            ("EPS Growth",       f'{info.get("eps_growth")*100:.1f}%' if info.get("eps_growth") else "N/A", "Earnings growth rate"),
+                            ("Debt/Equity",      f'{info.get("debt_equity"):.0f}' if info.get("debt_equity") else "N/A", "Debt level — lower is safer"),
+                            ("ROE",              f'{info.get("roe")*100:.1f}%' if info.get("roe") else "N/A", "Profitability per $ invested"),
+                            ("Short Interest",   f'{info.get("short_pct")*100:.1f}%' if info.get("short_pct") else "N/A", "% betting the stock falls"),
+                            ("Beta",             f'{info.get("beta"):.2f}' if info.get("beta") else "N/A",    "Volatility vs market"),
+                        ]
+                        for label, value, explain in metric_rows:
+                            st.markdown(
+                                f'<div style="display:flex;justify-content:space-between;'
+                                f'align-items:center;padding:5px 0;border-bottom:1px solid #141E30">'
+                                f'<div>'
+                                f'<span style="font-size:0.78rem;color:#718096">{label}</span>'
+                                f'<span style="font-size:0.65rem;color:#4A5568;margin-left:6px;font-style:italic">{explain}</span>'
+                                f'</div>'
+                                f'<span style="font-family:IBM Plex Mono;font-size:0.8rem;color:#EDF2F7">{value}</span>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+
+                    # Analyst target
+                    if analyst.get("target") and price:
+                        up = analyst["upside"] or 0
+                        up_c = "#00E676" if up > 0 else "#F56565"
+                        st.markdown(
+                            f'<div style="margin-top:12px;background:#141E30;border-radius:8px;padding:10px 12px">'
+                            f'<div style="font-size:0.68rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em">Analyst consensus</div>'
+                            f'<div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">'
+                            f'<span style="font-family:IBM Plex Mono;font-size:1rem;color:#EDF2F7">Target ${analyst["target"]:.2f}</span>'
+                            f'<span style="color:{up_c};font-weight:600">{up:+.1f}% upside</span>'
+                            f'</div>'
+                            f'<div style="font-size:0.72rem;color:#4A5568;margin-top:3px">'
+                            f'Based on {analyst.get("n_analysts",0)} analyst{"s" if analyst.get("n_analysts",0)!=1 else ""}'
+                            f'</div></div>',
+                            unsafe_allow_html=True
+                        )
+
+                with right_col:
+                    # ── TABBED DETAIL ──
+                    detail_tabs = st.tabs(["📈 Chart", "🤖 AI Analysis", "📰 News", "🏛 Insider", "📊 Score"])
+
+                    with detail_tabs[0]:
+                        st.plotly_chart(chart_price(df, tk),
+                                        use_container_width=True, key=f"chart_{tk}")
+
+                    with detail_tabs[1]:
+                        ai_key = f"ai_{tk}"
+                        if st.button(f"Generate analysis", key=f"ai_btn_{tk}", type="primary"):
+                            with st.spinner("Claude is analysing…"):
+                                reg2  = get_market_regime()
+                                opts2 = get_options(tk)
+                                risk2 = score_stock(tk, df, info, opts2, fg, vix)
+                                text  = run_ai_analysis(tk, info, risk2, analyst,
+                                                        insider, news, reg2)
+                                st.session_state[ai_key] = text
+                        if ai_key in st.session_state:
+                            st.markdown(
+                                '<div class="advice-prose">' +
+                                st.session_state[ai_key].replace("\n", "<br>") +
+                                '</div>',
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.caption("Click above to generate a plain English analysis from Claude AI.")
+
+                    with detail_tabs[2]:
+                        sent = news.get("sentiment","neutral")
+                        sc   = news.get("score", 50)
+                        sent_color = "#00E676" if sent=="bullish" else ("#F56565" if sent=="bearish" else "#F6AD55")
+                        st.markdown(
+                            f'<div style="font-family:Syne,sans-serif;font-weight:700;'
+                            f'color:{sent_color};margin-bottom:8px">'
+                            f'{"📈 Bullish" if sent=="bullish" else ("📉 Bearish" if sent=="bearish" else "➡️ Neutral")} news sentiment</div>',
+                            unsafe_allow_html=True
+                        )
+                        # Sentiment bar
+                        st.markdown(
+                            f'<div style="background:#141E30;border-radius:4px;height:8px;margin-bottom:12px">'
+                            f'<div style="width:{sc}%;height:100%;background:linear-gradient(90deg,#F56565,#F6AD55,#00E676);border-radius:4px"></div>'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                        headlines = news.get("headlines", [])
+                        if headlines:
+                            for h in headlines[:6]:
+                                if h.get("title"):
+                                    url = h.get("url","")
+                                    src = h.get("source","")
+                                    line = f'[{h["title"]}]({url})' if url else h["title"]
+                                    st.markdown(f'- {line}' + (f' — *{src}*' if src else ""))
+                        else:
+                            st.caption("No headlines found. Add a Finnhub key in ⚙️ Settings for better coverage.")
+
+                    with detail_tabs[3]:
+                        ins_net = insider.get("net_shares", 0)
+                        ins_c   = "#00E676" if ins_net > 0 else ("#F56565" if ins_net < 0 else "#718096")
+                        st.markdown(
+                            f'<div style="color:{ins_c};font-weight:600;font-size:0.85rem;margin-bottom:8px">'
+                            f'{insider.get("summary","No insider data.")}</div>',
+                            unsafe_allow_html=True
+                        )
+                        for t in insider.get("transactions", [])[:6]:
+                            tc = "#00E676" if t.get("is_buy") else "#F56565"
+                            st.markdown(
+                                f'<div style="display:flex;gap:8px;font-size:0.75rem;padding:5px 0;border-bottom:1px solid #141E30">'
+                                f'<span style="color:#718096;width:130px">{t["insider"][:20]}</span>'
+                                f'<span style="color:{tc};font-family:IBM Plex Mono;width:45px;font-weight:600">{t["type"]}</span>'
+                                f'<span style="color:#A0AEC0;font-family:IBM Plex Mono">{t["shares"]:,} shares</span>'
+                                f'</div>',
+                                unsafe_allow_html=True
+                            )
+
+                    with detail_tabs[4]:
+                        st.markdown("**Score breakdown — why it got this rating:**")
                         for cat, bd in risk["breakdowns"].items():
                             st.markdown(f"**{cat}**")
                             for item, val in bd.items():
-                                if isinstance(val, (int,float)):
+                                if isinstance(val, (int, float)):
                                     bc = "#00E676" if val>=15 else ("#F6AD55" if val>=8 else "#F56565")
                                     st.markdown(
                                         f'<div style="display:flex;align-items:center;gap:10px;margin:3px 0">'
-                                        f'<div style="font-size:0.78rem;color:#718096;width:360px">{item}</div>'
-                                        f'<div style="background:#141E30;border-radius:3px;height:6px;width:150px;overflow:hidden">'
+                                        f'<div style="font-size:0.75rem;color:#718096;width:300px">{item}</div>'
+                                        f'<div style="background:#141E30;border-radius:3px;height:6px;width:120px;overflow:hidden">'
                                         f'<div style="width:{int(val)}%;height:100%;background:{bc};border-radius:3px"></div></div>'
-                                        f'<div style="font-family:IBM Plex Mono;font-size:0.75rem;color:{bc}">{val:.0f}pts</div>'
+                                        f'<div style="font-family:IBM Plex Mono;font-size:0.72rem;color:{bc}">{val:.0f}pts</div>'
                                         f'</div>',
                                         unsafe_allow_html=True
                                     )
 
-                with st.expander("🤖 AI Analysis + News"):
-                    ai_key = f"ai_{tk}"
-                    if st.button(f"Generate AI analysis for {tk}", key=f"ai_btn_{tk}", type="primary"):
-                        with st.spinner("Claude is analysing…"):
-                            fg2  = get_fear_greed()
-                            vix2 = get_vix()
-                            reg2 = get_market_regime()
-                            opts2 = get_options(tk)
-                            risk2 = score_stock(tk, df, info, opts2, fg2, vix2)
-                            text = run_ai_analysis(tk, info, risk2, r["analyst"],
-                                                   r["insider"], r["news"], reg2)
-                            st.session_state[ai_key] = text
-                    if ai_key in st.session_state:
-                        st.markdown(
-                            '<div class="card"><div class="advice-prose">' +
-                            st.session_state[ai_key].replace("\n","<br>") +
-                            '</div></div>',
-                            unsafe_allow_html=True
-                        )
-                    if r["news"]["headlines"]:
-                        st.markdown("**Recent news**")
-                        for h in r["news"]["headlines"][:5]:
-                            if h.get("title"):
-                                url = h.get("url","")
-                                src = h.get("source","")
-                                line = f'[{h["title"]}]({url})' if url else h["title"]
-                                st.markdown(f'- {line}' + (f' — *{src}*' if src else ""))
-
-                with st.expander("🏦 Analyst & Insider data"):
-                    an = r["analyst"]; ins = r["insider"]
-                    ac1,ac2 = st.columns(2)
-                    with ac1:
-                        st.markdown("**Wall Street consensus**")
-                        if an.get("target"):
-                            up_c = "#00E676" if (an.get("upside") or 0)>0 else "#F56565"
-                            st.markdown(
-                                f'<div class="metric-tile" style="text-align:left;margin-bottom:8px">'
-                                f'<div class="mt-label">Average price target</div>'
-                                f'<div class="mt-value">${an["target"]:.2f}</div>'
-                                f'<div style="color:{up_c};font-size:0.8rem">{an.get("upside",0):+.1f}% from here</div>'
-                                f'</div>',
-                                unsafe_allow_html=True
-                            )
-                            total_r = an["strong_buy"]+an["buy"]+an["hold"]+an["sell"]+an["strong_sell"]
-                            if total_r > 0:
-                                for label, cnt, lc in [
-                                    ("Strong Buy",an["strong_buy"],"#00E676"),("Buy",an["buy"],"#69F0AE"),
-                                    ("Hold",an["hold"],"#F6AD55"),("Sell",an["sell"],"#FC8181"),
-                                    ("Strong Sell",an["strong_sell"],"#F56565")
-                                ]:
-                                    pct = cnt/total_r*100
-                                    st.markdown(
-                                        f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
-                                        f'<div style="width:80px;font-size:0.75rem;color:#718096">{label}</div>'
-                                        f'<div style="background:#141E30;height:8px;width:120px;border-radius:3px;overflow:hidden">'
-                                        f'<div style="width:{pct:.0f}%;height:100%;background:{lc};border-radius:3px"></div></div>'
-                                        f'<div style="font-family:IBM Plex Mono;font-size:0.72rem;color:{lc}">{cnt}</div></div>',
-                                        unsafe_allow_html=True
-                                    )
-                        else:
-                            st.caption("No analyst data available.")
-                    with ac2:
-                        st.markdown("**Insider activity**")
-                        nc = "#00E676" if ins.get("net_shares",0)>0 else ("#F56565" if ins.get("net_shares",0)<0 else "#718096")
-                        st.markdown(f'<div style="font-size:0.83rem;color:{nc};margin-bottom:8px">{ins.get("summary","")}</div>',
-                                    unsafe_allow_html=True)
-                        for t in ins.get("transactions",[])[:5]:
-                            tc = "#00E676" if t.get("is_buy") else "#F56565"
-                            st.markdown(
-                                f'<div style="display:flex;gap:8px;font-size:0.75rem;padding:4px 0;border-bottom:1px solid #141E30">'
-                                f'<span style="color:#718096;width:120px">{t["insider"][:18]}</span>'
-                                f'<span style="color:{tc};font-family:IBM Plex Mono;width:40px">{t["type"]}</span>'
-                                f'<span style="color:#A0AEC0;font-family:IBM Plex Mono">{t["shares"]:,}</span>'
-                                f'</div>',
-                                unsafe_allow_html=True
-                            )
-
-                # Add to portfolio button
-                pc1,pc2 = st.columns(2)
-                with pc1:
-                    if st.button(f"➕ Add {tk} to portfolio", key=f"port_{tk}"):
-                        st.session_state["prefill_ticker"] = tk
-                        st.session_state["page"] = "portfolio"
-                        st.rerun()
+                # Add to portfolio
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button(f"➕ Add {tk} to portfolio", key=f"port_{tk}"):
+                    st.session_state["prefill_ticker"] = tk
+                    st.session_state["page"] = "portfolio"
+                    st.rerun()
 
                 st.markdown('</div>', unsafe_allow_html=True)
 
-    render_stock_cards(green,  "🟢 LOW RISK",
-                       "Conditions are relatively favourable. Lower chance of loss, typically lower short-term upside.",
-                       "#00E676")
-    render_stock_cards(yellow, "🟡 MEDIUM RISK",
-                       "Mixed signals. Trade smaller than usual. Watch closely after entering.",
-                       "#F6AD55")
-    render_stock_cards(red,    "🔴 HIGH RISK",
-                       "Multiple warning signs. Higher potential reward but higher chance of loss. Small position, tight stop-loss.",
-                       "#F56565")
+    render_cards(green,  "#00E676", "🟢 LOW RISK",
+                 "Conditions are relatively favourable. Good starting point for new positions.")
+    render_cards(yellow, "#F6AD55", "🟡 MEDIUM RISK",
+                 "Mixed signals. Trade smaller than usual. Watch closely after entering.")
+    render_cards(red,    "#F56565", "🔴 HIGH RISK",
+                 "Multiple warning signs. Small position only, tight stop-loss required.")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-#  PAGE: SCANNER
-# ─────────────────────────────────────────────────────────────
-
-def get_scan_universe():
-    sp500 = [
-        "AAPL","MSFT","NVDA","AVGO","ORCL","CRM","AMD","INTC","QCOM","TXN",
-        "AMAT","MU","KLAC","LRCX","ADI","MRVL","CDNS","SNPS","FTNT","PANW",
-        "LLY","UNH","JNJ","ABBV","MRK","TMO","ABT","DHR","BMY","AMGN",
-        "GILD","VRTX","REGN","ISRG","SYK","ELV","CI","HUM","CVS","MDT",
-        "BRK-B","JPM","V","MA","BAC","WFC","GS","MS","BLK","SCHW",
-        "AXP","SPGI","MCO","ICE","CME","PGR","TRV","AFL","MET","PRU",
-        "AMZN","TSLA","HD","MCD","NKE","SBUX","TJX","LOW","BKNG","CMG",
-        "ABNB","ETSY","ROST","DG","DLTR","YUM","DRI","HLT","MAR","F",
-        "META","GOOGL","NFLX","DIS","CMCSA","T","VZ","TMUS","EA","TTWO",
-        "CAT","BA","HON","UPS","RTX","LMT","GE","MMM","DE","FDX",
-        "PG","KO","PEP","COST","WMT","PM","MO","MDLZ","CL","GIS",
-        "XOM","CVX","COP","EOG","SLB","MPC","PSX","VLO","OXY","HAL",
-        "NEE","DUK","SO","AEP","EXC","PLD","AMT","EQIX","CCI","PSA",
-    ]
-    nasdaq_extra = [
-        "ADBE","PYPL","INTU","LULU","MNST","MELI","NXPI","WDAY","TEAM",
-        "ZS","DDOG","CRWD","SNOW","OKTA","MDB","COIN","RBLX","HOOD",
-        "RIVN","ZM","DOCU","ROKU","TTD","APP","PLTR","SMCI","ARM","DELL",
-        "HPQ","ANET","FFIV","WDC","STX","PSTG",
-    ]
-    top_vol = [
-        "SPY","QQQ","IWM","GLD","SLV","TLT","HYG","EEM","ARKK",
-        "SQQQ","TQQQ","UVXY","GME","AMC","MARA","RIOT","CLSK",
-        "IBIT","BITO","NIO","XPEV","LI","BABA","JD","PDD","GDX","GDXJ",
-    ]
-    return list(dict.fromkeys(sp500 + nasdaq_extra + top_vol))
-
-def quick_screen(ticker):
-    try:
-        df = get_prices(ticker, period="3mo")
-        if df is None or len(df) < 20: return None
-        c = df["Close"]; v = df["Volume"]
-        price = float(c.iloc[-1])
-        e20  = float(c.ewm(span=20,  adjust=False).mean().iloc[-1])
-        e50  = float(c.ewm(span=50,  adjust=False).mean().iloc[-1])
-        ema50 = c.ewm(span=50, adjust=False).mean()
-        delta = c.diff()
-        gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-        loss  = (-delta).clip(lower=0).ewm(com=13, adjust=False).mean()
-        rsi   = float((100-(100/(1+gain/loss.replace(0,np.nan)))).iloc[-1])
-        e12 = c.ewm(span=12,adjust=False).mean(); e26 = c.ewm(span=26,adjust=False).mean()
-        macd = e12-e26; sig = macd.ewm(span=9,adjust=False).mean()
-        macd_bull = bool(macd.iloc[-1] > sig.iloc[-1])
-        macd_cross_up = bool(macd.iloc[-2] < sig.iloc[-2] and macd.iloc[-1] > sig.iloc[-1])
-        avg_vol = float(v.rolling(20).mean().iloc[-1])
-        vr      = float(v.iloc[-1]/avg_vol) if avg_vol > 0 else 1.0
-        mo1m = float((price/c.iloc[-21]-1)*100) if len(c)>=21 else 0
-        mo1w = float((price/c.iloc[-5]-1)*100)  if len(c)>=5  else 0
-        hi52 = float(c.max())
-        near_hi  = bool(price >= hi52*0.95)
-        uptrend  = bool(price > e20 and price > e50)
-        breakout = bool(len(c) >= 2 and float(c.iloc[-2]) < float(ema50.iloc[-2]) and price > e50)
-        signals = []; ss = 0
-        if uptrend and rsi > 50 and macd_bull:   signals.append("🟢 Uptrend confirmed"); ss+=30
-        if vr > 2.0:                              signals.append(f"🔊 Volume {vr:.1f}× avg"); ss+=20
-        if near_hi and mo1m > 5:                  signals.append("🏔 Near 52W high"); ss+=20
-        if macd_cross_up:                         signals.append("⚡ MACD bullish cross"); ss+=15
-        if mo1m > 15:                             signals.append(f"🚀 +{mo1m:.1f}% this month"); ss+=15
-        if breakout:                              signals.append("📈 Breaking above 50d avg"); ss+=10
-        if ss == 0: return None
-        return {"ticker":ticker,"price":round(price,2),"rsi":round(rsi,1),
-                "vr":round(vr,2),"mo1m":round(mo1m,2),"mo1w":round(mo1w,2),
-                "near_hi":near_hi,"uptrend":uptrend,"macd_bull":macd_bull,
-                "signals":signals,"score":ss}
-    except Exception:
-        return None
 
 def page_scanner():
     st.markdown('<div class="page-content">', unsafe_allow_html=True)
@@ -2487,8 +2820,16 @@ def page_journal():
 def page_settings():
     st.markdown('<div class="page-content">', unsafe_allow_html=True)
     st.markdown('<div class="page-title">⚙️ Settings</div>'
-                '<div class="page-subtitle">Configure your account, API keys, and scoring preferences</div>',
+                '<div class="page-subtitle">Configure your account, API keys, and scoring preferences — saved permanently to your Mac</div>',
                 unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="alert-good" style="margin-bottom:16px">' +
+        '✅ Settings are saved to your Mac and load automatically every time you start the app. ' +
+        'You only need to enter your API keys once.' +
+        '</div>',
+        unsafe_allow_html=True
+    )
 
     c1,c2 = st.columns(2)
 
@@ -2499,22 +2840,40 @@ def page_settings():
         rsk = st.slider("Max % to risk per trade", 0.25, 5.0,
                          st.session_state.max_risk_pct, 0.25,
                          help="Professionals use 1-2%. Start at 1% as a beginner.")
-        if st.button("Save account settings", type="primary"):
-            st.session_state.account_size = acc
-            st.session_state.max_risk_pct = rsk
-            st.success("Saved")
 
-        st.markdown('<div class="section-title">API Keys</div>', unsafe_allow_html=True)
-        ak = st.text_input("Anthropic API key (for AI analysis)",
+        st.markdown('<div class="section-title">API Keys — saved permanently</div>', unsafe_allow_html=True)
+        ak = st.text_input("Anthropic API key (AI analysis)",
                             value=st.session_state.anthropic_key, type="password",
                             help="Free tier at console.anthropic.com")
-        fk = st.text_input("Finnhub API key (for news)",
+        fk = st.text_input("Finnhub API key (news headlines)",
                             value=st.session_state.finnhub_key, type="password",
                             help="Free at finnhub.io")
-        if st.button("Save API keys", type="primary"):
+
+        st.markdown('<div class="section-title">Alpaca (optional — for portfolio sync)</div>',
+                    unsafe_allow_html=True)
+        st.caption("Free at alpaca.markets — connects your Alpaca portfolio to the dashboard")
+        al_key = st.text_input("Alpaca API key",
+                                value=st.session_state.get("alpaca_key",""), type="password")
+        al_sec = st.text_input("Alpaca secret key",
+                                value=st.session_state.get("alpaca_secret",""), type="password")
+
+        if st.button("💾 Save all settings", type="primary"):
+            st.session_state.account_size  = acc
+            st.session_state.max_risk_pct  = rsk
             st.session_state.anthropic_key = ak
             st.session_state.finnhub_key   = fk
-            st.success("Keys saved for this session")
+            st.session_state.alpaca_key    = al_key
+            st.session_state.alpaca_secret = al_sec
+            save_config({
+                "account_size":  acc,
+                "max_risk_pct":  rsk,
+                "anthropic_key": ak,
+                "finnhub_key":   fk,
+                "alpaca_key":    al_key,
+                "alpaca_secret": al_sec,
+                "risk_weights":  st.session_state.risk_weights,
+            })
+            st.success("✅ All settings saved permanently to your Mac!")
 
         st.markdown('<div class="section-title">Scanning</div>', unsafe_allow_html=True)
         paused = st.toggle("⏸ Pause all scanning (saves battery)",
@@ -2538,8 +2897,17 @@ def page_settings():
             st.error(f"Weights total {total}% — must equal 100%")
         else:
             if st.button("Save weights", type="primary"):
-                st.session_state.risk_weights = {
-                    "technical":wt,"fundamental":wf,"sentiment":ws,"performance":wp}
+                new_weights = {"technical":wt,"fundamental":wf,"sentiment":ws,"performance":wp}
+                st.session_state.risk_weights = new_weights
+                save_config({
+                    "account_size":  st.session_state.account_size,
+                    "max_risk_pct":  st.session_state.max_risk_pct,
+                    "anthropic_key": st.session_state.anthropic_key,
+                    "finnhub_key":   st.session_state.finnhub_key,
+                    "alpaca_key":    st.session_state.get("alpaca_key",""),
+                    "alpaca_secret": st.session_state.get("alpaca_secret",""),
+                    "risk_weights":  new_weights,
+                })
                 st.success("Weights saved")
 
         st.markdown('<div class="section-title">Data & Cache</div>', unsafe_allow_html=True)
@@ -2573,16 +2941,14 @@ def main():
     render_nav()
 
     page = st.session_state.page
-    if page == "briefing":       page_briefing()
-    elif page == "portfolio":    page_portfolio()
-    elif page == "opportunities":page_opportunities()
-    elif page == "scanner":      page_scanner()
-    elif page == "planner":      page_planner()
-    elif page == "journal":      page_journal()
-    elif page == "settings":     page_settings()
+    if page == "briefing":   page_briefing()
+    elif page == "portfolio": page_portfolio()
+    elif page == "watchlist": page_watchlist()
+    elif page == "scanner":   page_scanner()
+    elif page == "settings":  page_settings()
 
     # Auto-refresh
-    if not st.session_state.paused and page in ("briefing","opportunities"):
+    if not st.session_state.paused and page in ("briefing","watchlist"):
         elapsed = time.time() - st.session_state.last_refresh
         if elapsed >= st.session_state.refresh_interval:
             st.session_state.last_refresh = time.time()

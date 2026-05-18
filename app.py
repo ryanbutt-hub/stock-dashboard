@@ -1752,7 +1752,9 @@ def page_briefing():
     fred = get_fred_macro()
     if fred:
         fred_keys = ["fed_rate","yield_10yr","yield_2yr","yield_spread","unemployment"]
-        fred_cols = st.columns(len([k for k in fred_keys if k in fred]))
+        visible = [k for k in fred_keys if k in fred]
+        n_cols  = max(1, len(visible))
+        fred_cols = st.columns(n_cols)
         col_i = 0
         for key in fred_keys:
             if key not in fred: continue

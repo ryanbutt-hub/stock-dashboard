@@ -1,9 +1,9 @@
 """
 ================================================================================
-SMART STOCK ADVISOR  v3.0  —  app.py
+SMART STOCK ADVISOR  v3.0   -   app.py
 ================================================================================
 Rebuilt from scratch. Claude AI is the primary analyst.
-Data supports the verdict — not the other way around.
+Data supports the verdict  -  not the other way around.
 
 Six tabs: Portfolio, Watchlist, Scanner, Market Health, AI Advisor, Settings
 Run:  streamlit run app.py
@@ -437,11 +437,11 @@ def indicators(df):
     df["BBU"]=sma20+2*std20; df["BBL"]=sma20-2*std20
     return df
 
-# ── AI Analysis — the primary advisor ────────────────────────
+# ── AI Analysis  -  the primary advisor ────────────────────────
 def ai_analysis(tk, inf, an, ins, nws, mkt, mode="stock"):
     """
     Claude reads ALL available data and writes the verdict first.
-    The score is derived from the reasoning — not the other way around.
+    The score is derived from the reasoning  -  not the other way around.
     """
     key = st.session_state.anthropic_key
     if not key:
@@ -476,7 +476,7 @@ Current data:
 - News: {nws.get('sentiment','neutral')} | {'; '.join(headlines[:2]) if headlines else 'No headlines'}
 - Financials: P/E {inf.get('pe','N/A')} | EPS growth {f"{inf.get('eps_gr',0)*100:.1f}%" if inf.get('eps_gr') else 'N/A'} | FCF {'positive' if inf.get('fcf') and inf.get('fcf')>0 else 'negative'}
 
-Write 2-3 sentences max. Be direct. Start with HOLD, REDUCE, or ADD — then explain why in plain English. Focus on what matters most right now."""
+Write 2-3 sentences max. Be direct. Start with HOLD, REDUCE, or ADD  -  then explain why in plain English. Focus on what matters most right now."""
         else:
             prompt = f"""You are a plain-English stock advisor helping a complete beginner make a decision about {name} ({tk}).
 
@@ -535,18 +535,18 @@ Be honest. If analysts think it's overvalued, say so. If the market is in a bear
     except Exception as e:
         err = str(e)
         if "401" in err or "auth" in err.lower():
-            return None, "❌ Invalid API key — check Settings."
+            return None, "❌ Invalid API key  -  check Settings."
         if "429" in err:
-            return None, "⏳ Rate limit — wait a minute."
+            return None, "⏳ Rate limit  -  wait a minute."
         if "404" in err:
-            return None, "❌ Model not found — check your Anthropic account has credits."
+            return None, "❌ Model not found  -  check your Anthropic account has credits."
         return None, f"❌ Error: {err[:100]}"
 
 # ── Support score (data quality check) ───────────────────────
 def data_score(inf, an, df):
     """
     A simple 0-100 score based purely on data quality signals.
-    NOT the primary verdict — just supporting evidence for the AI.
+    NOT the primary verdict  -  just supporting evidence for the AI.
     Lower = warning signs in the data. Higher = data looks healthy.
     """
     s = 0
@@ -576,9 +576,9 @@ def data_score(inf, an, df):
 # ── Verdict styling ───────────────────────────────────────────
 VERDICT_STYLE = {
     "BUY":   {"css":"verdict-buy",  "color":"#00E676","emoji":"🟢","note":"Conditions look favourable for a new position."},
-    "WAIT":  {"css":"verdict-wait", "color":"#F6AD55","emoji":"🟡","note":"Mixed signals — watch but don't rush in."},
+    "WAIT":  {"css":"verdict-wait", "color":"#F6AD55","emoji":"🟡","note":"Mixed signals  -  watch but don't rush in."},
     "AVOID": {"css":"verdict-avoid","color":"#F56565","emoji":"🔴","note":"Multiple concerns present. Not the right time."},
-    "HOLD":  {"css":"verdict-hold", "color":"#63B3ED","emoji":"🔵","note":"You own this — continue holding for now."},
+    "HOLD":  {"css":"verdict-hold", "color":"#63B3ED","emoji":"🔵","note":"You own this  -  continue holding for now."},
 }
 
 def get_vs(v):
@@ -589,7 +589,7 @@ def chart_price(df, tk, entry=None, stop=None, target=None):
     if df is None or df.empty: return go.Figure()
     fig = make_subplots(rows=3,cols=1,shared_xaxes=True,
         row_heights=[0.55,0.20,0.25],vertical_spacing=0.02,
-        subplot_titles=(f"{tk} — Price","Volume","RSI (30=oversold / 70=overbought)"))
+        subplot_titles=(f"{tk}  -  Price","Volume","RSI (30=oversold / 70=overbought)"))
     fig.add_trace(go.Candlestick(
         x=df.index,open=df["Open"],high=df["High"],low=df["Low"],close=df["Close"],
         name="Price",
@@ -639,7 +639,7 @@ def chart_sector(sec_perf):
     clrs = ["#00E676" if v>=0 else "#F56565" for v in df["1M %"]]
     fig = go.Figure(go.Bar(x=df["1M %"],y=df["Sector"],orientation="h",
         marker_color=clrs,text=df["1M %"].round(1),textposition="outside"))
-    fig.update_layout(height=340,title="Sector performance — past month",**CHART)
+    fig.update_layout(height=340,title="Sector performance  -  past month",**CHART)
     return fig
 
 # ── Portfolio position loader ─────────────────────────────────
@@ -703,7 +703,7 @@ def pos_size(account, risk_pct, price, stop):
 # ── TAB: PORTFOLIO ────────────────────────────────────────────
 def tab_portfolio():
     st.markdown("## 💼 My Portfolio")
-    st.caption("Your open eToro positions — live P&L, stop-loss distances, and AI verdict on each.")
+    st.caption("Your open eToro positions  -  live P&L, stop-loss distances, and AI verdict on each.")
 
     # Add/import
     with st.expander("➕ Add or import positions", expanded=False):
@@ -715,8 +715,8 @@ def tab_portfolio():
                 sh_in  = st.number_input("Shares",min_value=0.001,step=0.001,format="%.5f")
                 ep_in  = st.number_input("Avg open price ($)",min_value=0.01,step=0.01)
                 dt_in  = st.date_input("Date opened")
-                sl_in  = st.number_input("Stop-loss ($) — 0=auto",min_value=0.0,step=0.01)
-                tg_in  = st.number_input("Target ($) — 0=none",min_value=0.0,step=0.01)
+                sl_in  = st.number_input("Stop-loss ($)  -  0=auto",min_value=0.0,step=0.01)
+                tg_in  = st.number_input("Target ($)  -  0=none",min_value=0.0,step=0.01)
                 if st.form_submit_button("Add position",type="primary"):
                     if tk_in and sh_in>0 and ep_in>0:
                         conn=db()
@@ -849,7 +849,7 @@ def tab_portfolio():
             ed = earnings_date(p["ticker"])
             if ed["days"] is not None and 0<=ed["days"]<=14:
                 st.markdown(
-                    f'<div class="a-amber">⚡ Earnings in {ed["days"]} days ({ed["date"]}) — stocks can move sharply. Consider your position size.</div>',
+                    f'<div class="a-amber">⚡ Earnings in {ed["days"]} days ({ed["date"]})  -  stocks can move sharply. Consider your position size.</div>',
                     unsafe_allow_html=True
                 )
 
@@ -897,7 +897,7 @@ def tab_portfolio():
 # ── TAB: WATCHLIST ────────────────────────────────────────────
 def tab_watchlist():
     st.markdown("## 🚦 Watchlist")
-    st.caption("Stocks you are tracking — AI verdict first, supporting data below.")
+    st.caption("Stocks you are tracking  -  AI verdict first, supporting data below.")
 
     wc1,wc2,wc3 = st.columns([3,1,2])
     new_tk = wc1.text_input("Add stock:",placeholder="e.g. NVDA",label_visibility="collapsed").upper().strip()
@@ -914,13 +914,13 @@ def tab_watchlist():
         st.info("Add stocks above to start tracking them. Try: NVDA, AAPL, MSFT, SPY")
         return
 
-    rem = wc3.selectbox("Remove:",["— keep all —"]+watchlist,label_visibility="collapsed")
-    if rem!="— keep all —":
+    rem = wc3.selectbox("Remove:",[" -  keep all  - "]+watchlist,label_visibility="collapsed")
+    if rem!=" -  keep all  - ":
         conn=db(); conn.execute("DELETE FROM watchlist WHERE ticker=?",(rem,)); conn.commit(); conn.close()
         st.rerun()
 
     if st.session_state.paused:
-        st.warning("⏸ Scanning paused — enable in Settings")
+        st.warning("⏸ Scanning paused  -  enable in Settings")
         return
 
     mkt = market_data()
@@ -932,7 +932,7 @@ def tab_watchlist():
     rc = mkt.get("regime_color","#4A5568")
     st.markdown(
         f'<div class="a-blue" style="margin-bottom:16px">'
-        f'<strong>Market context:</strong> <span style="color:{rc};font-weight:600">{regime}</span> — '
+        f'<strong>Market context:</strong> <span style="color:{rc};font-weight:600">{regime}</span>  -  '
         f'{mkt.get("regime_note","")} '
         f'VIX: <strong>{vx}</strong> · Fear & Greed: <strong>{fg["val"]} ({fg["label"]})</strong>'
         f'</div>',
@@ -1004,7 +1004,7 @@ def tab_watchlist():
             if pills:
                 st.markdown(pills, unsafe_allow_html=True)
 
-            # AI VERDICT — primary section
+            # AI VERDICT  -  primary section
             ai_key = f"wl_ai_{tk}"
             if st.button(f"🤖 Generate AI verdict for {tk}", key=f"wl_ai_btn_{tk}", type="primary"):
                 with st.spinner(f"Claude is analysing {tk}…"):
@@ -1018,7 +1018,7 @@ def tab_watchlist():
                 st.markdown(
                     f'<div class="{vs["css"]}">'
                     f'<div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;'
-                    f'color:{vs["color"]};margin-bottom:10px">{vs["emoji"]} {v} — {vs["note"]}</div>'
+                    f'color:{vs["color"]};margin-bottom:10px">{vs["emoji"]} {v}  -  {vs["note"]}</div>'
                     f'<div style="font-size:0.88rem;line-height:1.75;color:#A0AEC0">'
                     f'{str(t).replace(chr(10),"<br>")}'
                     f'</div></div>',
@@ -1046,7 +1046,7 @@ def tab_watchlist():
                         ("Debt/Equity",          f'{inf.get("de"):.0f}' if inf.get("de") else "N/A",        "Lower = less debt. Above 100 needs scrutiny."),
                         ("ROE",                  f'{inf.get("roe",0)*100:.1f}%' if inf.get("roe") else "N/A","Profit per $1 of investment."),
                         ("Short Interest",       f'{inf.get("short_pct",0)*100:.1f}%' if inf.get("short_pct") else "N/A","% betting the stock falls."),
-                        ("52W Range",            f'${inf.get("52w_lo","?"):.0f} – ${inf.get("52w_hi","?"):.0f}' if inf.get("52w_lo") else "N/A","Lowest and highest price this year."),
+                        ("52W Range",            f'${inf.get("52w_lo","?"):.0f}  -  ${inf.get("52w_hi","?"):.0f}' if inf.get("52w_lo") else "N/A","Lowest and highest price this year."),
                     ]
                     for label,value,explain in rows:
                         st.markdown(
@@ -1123,7 +1123,7 @@ def tab_watchlist():
                         f'<div style="font-family:IBM Plex Mono;font-size:1.2rem;color:#EDF2F7">${an["target"]:.2f}</div></div>'
                         f'<div style="color:{up_c};font-size:1rem;font-weight:600">{up:+.1f}% upside</div>'
                         f'</div>'
-                        f'<div style="font-size:0.72rem;color:#4A5568;margin-top:4px">Range: ${an.get("target_low",0):.0f} – ${an.get("target_high",0):.0f} · {an.get("n",0)} analysts</div>'
+                        f'<div style="font-size:0.72rem;color:#4A5568;margin-top:4px">Range: ${an.get("target_low",0):.0f}  -  ${an.get("target_high",0):.0f} · {an.get("n",0)} analysts</div>'
                         f'</div>',
                         unsafe_allow_html=True
                     )
@@ -1177,7 +1177,7 @@ def tab_scanner():
     last_run = st.session_state.scanner_ts
     if last_run:
         age = (time.time()-last_run)/3600
-        st.caption(f"Last scan: {datetime.datetime.fromtimestamp(last_run).strftime('%H:%M:%S')} — {age:.1f}h ago")
+        st.caption(f"Last scan: {datetime.datetime.fromtimestamp(last_run).strftime('%H:%M:%S')}  -  {age:.1f}h ago")
 
     fc1,fc2,fc3 = st.columns(3)
     min_score = fc1.slider("Min signal score",10,60,20,5)
@@ -1228,7 +1228,7 @@ def tab_scanner():
         prog.empty()
         st.session_state.scanner_results = results
         st.session_state.scanner_ts = time.time()
-        st.success(f"✅ Scan complete — {len(results)} opportunities found")
+        st.success(f"✅ Scan complete  -  {len(results)} opportunities found")
 
     results = st.session_state.scanner_results
     if not results:
@@ -1266,13 +1266,13 @@ def tab_scanner():
 
     # Add to watchlist
     ac1,ac2 = st.columns([3,1])
-    add_tk = ac1.selectbox("Add to watchlist:",["—"]+[r["ticker"] for r in filtered])
-    if ac2.button("➕ Add") and add_tk!="—":
+    add_tk = ac1.selectbox("Add to watchlist:",[" - "]+[r["ticker"] for r in filtered])
+    if ac2.button("➕ Add") and add_tk!=" - ":
         conn=db(); conn.execute("INSERT OR IGNORE INTO watchlist(ticker) VALUES(?)",(add_tk,)); conn.commit(); conn.close()
         st.success(f"Added {add_tk}")
 
     # Top 10 cards
-    st.markdown('<div class="sec">Top 10 — with AI Quick Take</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Top 10  -  with AI Quick Take</div>', unsafe_allow_html=True)
     mkt = market_data()
     for r in filtered[:10]:
         color = "#00E676" if r["score"]>=50 else ("#F6AD55" if r["score"]>=30 else "#F56565")
@@ -1342,7 +1342,7 @@ def tab_market():
     fg_c = "#00E676" if fg["val"]>60 else ("#F56565" if fg["val"]<30 else "#F6AD55")
     vx_c = "#00E676" if vx and vx<15 else ("#F56565" if vx and vx>30 else "#F6AD55")
     g1.markdown(mt("Fear & Greed Index", str(fg["val"]), fg["label"], fg_c), unsafe_allow_html=True)
-    g2.markdown(mt("VIX — Market Fear",  str(vx) if vx else "N/A", "<15 calm · >30 panic", vx_c), unsafe_allow_html=True)
+    g2.markdown(mt("VIX  -  Market Fear",  str(vx) if vx else "N/A", "<15 calm · >30 panic", vx_c), unsafe_allow_html=True)
 
     spy = mkt.get("indices",{}).get("SPY",{})
     qqq = mkt.get("indices",{}).get("QQQ",{})
@@ -1352,7 +1352,7 @@ def tab_market():
                    "#00E676" if qqq.get("mo1m",0)>=0 else "#F56565"), unsafe_allow_html=True)
 
     # Index health
-    st.markdown('<div class="sec">Index Health — Are Markets Above Key Trend Lines?</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Index Health  -  Are Markets Above Key Trend Lines?</div>', unsafe_allow_html=True)
     for sym,idx in mkt.get("indices",{}).items():
         above_all = idx.get("above_200") and idx.get("above_50")
         above_some = idx.get("above_50") or idx.get("above_200")
@@ -1376,7 +1376,7 @@ def tab_market():
         )
 
     # Sector rotation
-    st.markdown('<div class="sec">Sector Rotation — Which Industries Are Hot Right Now?</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec">Sector Rotation  -  Which Industries Are Hot Right Now?</div>', unsafe_allow_html=True)
     secs = mkt.get("sectors",{})
     if secs:
         st.plotly_chart(chart_sector(secs), use_container_width=True)
@@ -1384,11 +1384,11 @@ def tab_market():
         bot3 = sorted(secs,key=secs.get)[:3]
         tc1,tc2 = st.columns(2)
         with tc1:
-            st.markdown("**🔥 Strongest sectors — look here first**")
+            st.markdown("**🔥 Strongest sectors  -  look here first**")
             for s in top3:
                 st.markdown(f'- <span class="pill p-g">{s}</span> {secs[s]:+.1f}%', unsafe_allow_html=True)
         with tc2:
-            st.markdown("**❄️ Weakest sectors — avoid unless specific reason**")
+            st.markdown("**❄️ Weakest sectors  -  avoid unless specific reason**")
             for s in bot3:
                 st.markdown(f'- <span class="pill p-r">{s}</span> {secs[s]:+.1f}%', unsafe_allow_html=True)
 
@@ -1477,7 +1477,7 @@ Write a clear, plain-English portfolio brief structured as:
 One sentence overall assessment.
 
 **Position-by-position:**
-For each position: one sentence on whether to HOLD, ADD, or REDUCE — and why. Be specific about stop-losses that are being tested.
+For each position: one sentence on whether to HOLD, ADD, or REDUCE  -  and why. Be specific about stop-losses that are being tested.
 
 **Top 3 priority actions:**
 Number them. Be specific. Include price levels where relevant.
@@ -1528,7 +1528,7 @@ Keep it practical and honest. If something is at risk, say so clearly."""
         st.markdown(
             f'<div class="{vs["css"]}">'
             f'<div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;color:{vs["color"]};margin-bottom:10px">'
-            f'{vs["emoji"]} {r["ticker"]} — {v}</div>'
+            f'{vs["emoji"]} {r["ticker"]}  -  {v}</div>'
             f'<div style="font-size:0.88rem;line-height:1.75;color:#A0AEC0">'
             f'{str(t).replace(chr(10),"<br>")}'
             f'</div></div>',
@@ -1548,7 +1548,7 @@ def tab_settings():
         acc = st.number_input("Account size ($)",value=st.session_state.account_size,min_value=100.0,step=500.0)
         rsk = st.slider("Max % to risk per trade",0.25,5.0,st.session_state.max_risk_pct,0.25,
                          help="Most professionals risk 1-2%. As a beginner, start at 1%.")
-        st.markdown('<div class="sec">API Keys — saved permanently</div>', unsafe_allow_html=True)
+        st.markdown('<div class="sec">API Keys  -  saved permanently</div>', unsafe_allow_html=True)
         ak = st.text_input("Anthropic API key (AI analysis)",value=st.session_state.anthropic_key,type="password",
                            help="Free tier at console.anthropic.com")
         fk = st.text_input("Finnhub API key (news headlines)",value=st.session_state.finnhub_key,type="password",

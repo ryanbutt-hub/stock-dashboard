@@ -2442,6 +2442,84 @@ def page_watchlist():
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+
+# ─────────────────────────────────────────────────────────────
+#  SCANNER UNIVERSE + QUICK SCREEN
+# ─────────────────────────────────────────────────────────────
+
+def get_scan_universe():
+    sp500 = [
+        "AAPL","MSFT","NVDA","AVGO","ORCL","CRM","AMD","INTC","QCOM","TXN",
+        "AMAT","MU","KLAC","LRCX","ADI","MRVL","CDNS","SNPS","FTNT","PANW",
+        "LLY","UNH","JNJ","ABBV","MRK","TMO","ABT","DHR","BMY","AMGN",
+        "GILD","VRTX","REGN","ISRG","SYK","ELV","CI","HUM","CVS","MDT",
+        "BRK-B","JPM","V","MA","BAC","WFC","GS","MS","BLK","SCHW",
+        "AXP","SPGI","MCO","ICE","CME","PGR","TRV","AFL","MET","PRU",
+        "AMZN","TSLA","HD","MCD","NKE","SBUX","TJX","LOW","BKNG","CMG",
+        "ABNB","ETSY","ROST","DG","DLTR","YUM","DRI","HLT","MAR","F",
+        "META","GOOGL","NFLX","DIS","CMCSA","T","VZ","TMUS","EA","TTWO",
+        "CAT","BA","HON","UPS","RTX","LMT","GE","MMM","DE","FDX",
+        "PG","KO","PEP","COST","WMT","PM","MO","MDLZ","CL","GIS",
+        "XOM","CVX","COP","EOG","SLB","MPC","PSX","VLO","OXY","HAL",
+        "NEE","DUK","SO","AEP","EXC","PLD","AMT","EQIX","CCI","PSA",
+    ]
+    nasdaq_extra = [
+        "ADBE","PYPL","INTU","LULU","MNST","MELI","NXPI","WDAY","TEAM",
+        "ZS","DDOG","CRWD","SNOW","OKTA","MDB","COIN","RBLX","HOOD",
+        "RIVN","ZM","DOCU","ROKU","TTD","APP","PLTR","SMCI","ARM","DELL",
+        "HPQ","ANET","FFIV","WDC","STX","PSTG",
+    ]
+    top_vol = [
+        "SPY","QQQ","IWM","GLD","SLV","TLT","HYG","EEM","ARKK",
+        "SQQQ","TQQQ","UVXY","GME","AMC","MARA","RIOT","CLSK",
+        "IBIT","BITO","NIO","XPEV","LI","BABA","JD","PDD","GDX","GDXJ",
+    ]
+    return list(dict.fromkeys(sp500 + nasdaq_extra + top_vol))
+
+
+def quick_screen(ticker):
+    try:
+        df = get_prices(ticker, period="3mo")
+        if df is None or len(df) < 20: return None
+        c = df["Close"]; v = df["Volume"]
+        price = float(c.iloc[-1])
+        e20   = float(c.ewm(span=20, adjust=False).mean().iloc[-1])
+        e50   = float(c.ewm(span=50, adjust=False).mean().iloc[-1])
+        ema50 = c.ewm(span=50, adjust=False).mean()
+        delta = c.diff()
+        gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(com=13, adjust=False).mean()
+        rsi   = float((100-(100/(1+gain/loss.replace(0,np.nan)))).iloc[-1])
+        e12 = c.ewm(span=12, adjust=False).mean()
+        e26 = c.ewm(span=26, adjust=False).mean()
+        macd = e12 - e26; sig = macd.ewm(span=9, adjust=False).mean()
+        macd_bull     = bool(macd.iloc[-1] > sig.iloc[-1])
+        macd_cross_up = bool(macd.iloc[-2] < sig.iloc[-2] and macd.iloc[-1] > sig.iloc[-1])
+        avg_vol = float(v.rolling(20).mean().iloc[-1])
+        vr      = float(v.iloc[-1]/avg_vol) if avg_vol > 0 else 1.0
+        mo1m = float((price/c.iloc[-21]-1)*100) if len(c)>=21 else 0
+        mo1w = float((price/c.iloc[-5]-1)*100)  if len(c)>=5  else 0
+        hi52     = float(c.max())
+        near_hi  = bool(price >= hi52*0.95)
+        uptrend  = bool(price > e20 and price > e50)
+        breakout = bool(len(c)>=2 and float(c.iloc[-2]) < float(ema50.iloc[-2]) and price > e50)
+        signals = []; ss = 0
+        if uptrend and rsi > 50 and macd_bull: signals.append("🟢 Uptrend confirmed"); ss += 30
+        if vr > 2.0:                           signals.append(f"🔊 Volume {vr:.1f}× avg"); ss += 20
+        if near_hi and mo1m > 5:               signals.append("🏔 Near 52W high"); ss += 20
+        if macd_cross_up:                      signals.append("⚡ MACD bullish cross"); ss += 15
+        if mo1m > 15:                          signals.append(f"🚀 +{mo1m:.1f}% this month"); ss += 15
+        if breakout:                           signals.append("📈 Breaking above 50d avg"); ss += 10
+        if ss == 0: return None
+        return {
+            "ticker": ticker, "price": round(price,2), "rsi": round(rsi,1),
+            "vr": round(vr,2), "mo1m": round(mo1m,2), "mo1w": round(mo1w,2),
+            "near_hi": near_hi, "uptrend": uptrend, "macd_bull": macd_bull,
+            "signals": signals, "score": ss
+        }
+    except Exception:
+        return None
+
 def page_scanner():
     st.markdown('<div class="page-content">', unsafe_allow_html=True)
     st.markdown('<div class="page-title">🔭 Market Scanner</div>'

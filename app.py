@@ -2632,11 +2632,23 @@ def page_scanner():
                 unsafe_allow_html=True)
 
     # Summary table
-    rows = [{"Ticker":r["ticker"],"Price ($)":r["price"],"Signal Score":r["score"],
-             "1M Return (%)":r["mo1m"],"1W Return (%)":r["mo1w"],
-             "Volume Spike":f'{r["vr"]:.1f}×',"RSI":r["rsi"],
-             "Near 52W High":"✅" if r["near_hi"] else "","Uptrend":"✅" if r["uptrend"] else "",
-             "Key Signal":r["signals"][0] if r["signals"] else ""} for r in filtered]
+    rows = []
+    for r in filtered:
+        info_q = get_info(r["ticker"])
+        company_name = info_q.get("name", r["ticker"])[:28] if info_q else r["ticker"]
+        rows.append({
+            "Ticker":        r["ticker"],
+            "Company":       company_name,
+            "Price ($)":     r["price"],
+            "Signal Score":  r["score"],
+            "1M Return (%)": r["mo1m"],
+            "1W Return (%)": r["mo1w"],
+            "Volume Spike":  f'{r["vr"]:.1f}x',
+            "RSI":           r["rsi"],
+            "Near 52W High": "OK" if r["near_hi"] else "",
+            "Uptrend":       "OK" if r["uptrend"] else "",
+            "Key Signal":    r["signals"][0] if r["signals"] else "",
+        })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
                  column_config={"Signal Score":st.column_config.ProgressColumn(
                      "Signal Score",min_value=0,max_value=80,format="%d")})
@@ -2693,7 +2705,7 @@ def page_scanner():
             if f"scan_ai_{tk}" in st.session_state:
                 st.markdown(
                     '<div class="card" style="margin-top:8px"><div class="advice-prose">' +
-                    st.session_state[f"scan_ai_{tk}"].replace("\n","<br>") + '</div></div>',
+                    str(st.session_state[f"scan_ai_{tk}"]).replace("\n","<br>") + '</div></div>',
                     unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 

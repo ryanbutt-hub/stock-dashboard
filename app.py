@@ -2425,6 +2425,11 @@ def page_watchlist():
 
                 # Add to portfolio
                 st.markdown("<br>", unsafe_allow_html=True)
+                if st.button(f"✕ Remove {tk}", key=f"rm_{tk}"):
+                        conn = db()
+                        conn.execute("DELETE FROM watchlist WHERE ticker=?", (tk,))
+                        conn.commit(); conn.close()
+                        st.rerun()
                 if st.button(f"➕ Add {tk} to portfolio", key=f"port_{tk}"):
                     st.session_state["prefill_ticker"] = tk
                     st.session_state["page"] = "portfolio"

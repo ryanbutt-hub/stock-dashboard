@@ -569,7 +569,7 @@ def data_score(inf, an, df):
             if vr >= 1.2: s += 10
     if inf:
         if inf.get("eps_gr") and inf["eps_gr"] > 0.10: s += 10
-        if inf.get("fcf")    and inf["fcf"] > 0:        s += 10
+        if inf.get("fcf")    and inf['fcf'] > 0:        s += 10
         if inf.get("de") is not None and inf["de"] < 80: s += 5
     # Analyst upside
     if an.get("upside") and an["upside"] > 10: s += 5
@@ -826,14 +826,14 @@ def tab_portfolio():
                     unsafe_allow_html=True
                 )
             with h4:
-                if st.button("Close",key=f"cl_{p["id"]}"):
+                if st.button("Close",key=f"cl_{p['id']}"):
                     pnl = (p["price"]-p["entry"])*p["shares"]
                     conn=db()
                     conn.execute("INSERT INTO journal(ticker,entry_date,exit_date,entry_price,exit_price,shares,pnl,pnl_pct) VALUES(?,?,?,?,?,?,?,?)",
                         (p["ticker"],p["entry_date"],str(datetime.date.today()),p["entry"],p["price"],p["shares"],round(pnl,2),round((p["price"]/p["entry"]-1),4)))
                     conn.execute("UPDATE portfolio SET status='closed' WHERE id=?",(p["id"],))
                     conn.commit(); conn.close()
-                    st.success(f"Closed {p["ticker"]} P&L ${pnl:+.2f}"); st.rerun()
+                    st.success(f"Closed {p['ticker']} P&L ${pnl:+.2f}"); st.rerun()
 
             # Stop bar
             bar_w = max(0,min(100,100-p["stop_dist"]*5))
@@ -857,13 +857,13 @@ def tab_portfolio():
                 )
 
             # AI verdict for this position
-            ai_key = f"port_ai_{p["ticker"]}"
-            if st.button(f"🤖 Get AI verdict on {p["ticker"]}", key=f"portai_{p["id"]}", type="primary"):
-                with st.spinner(f"Analysing {p["ticker"]}…"):
+            ai_key = f"port_ai_{p['ticker']}"
+            if st.button(f"🤖 Get AI verdict on {p['ticker']}", key=f"portai_{p['id']}", type="primary"):
+                with st.spinner(f"Analysing {p['ticker']}…"):
                     an  = analyst_data(p["ticker"])
                     ins = insider_data(p["ticker"])
                     nws = news_data(p["ticker"])
-                    verdict, text = ai_analysis(p["ticker"], p["inf"], an, ins, nws, mkt, mode="portfolio")
+                    verdict, text = ai_analysis(p['ticker'], p['inf'], an, ins, nws, mkt, mode="portfolio")
                     st.session_state[ai_key] = {"verdict":verdict,"text":text}
 
             if ai_key in st.session_state:
@@ -880,16 +880,16 @@ def tab_portfolio():
                 )
 
             # Edit stop/target
-            with st.expander(f"Edit {p["ticker"]} stop-loss / target"):
+            with st.expander(f"Edit {p['ticker']} stop-loss / target"):
                 ec1,ec2 = st.columns(2)
-                ns = ec1.number_input("Stop-loss ($)",value=p["stop"],key=f"ns_{p["id"]}",step=0.01)
-                nt = ec2.number_input("Target ($)",value=p["target"] or 0.0,key=f"nt_{p["id"]}",step=0.01)
-                if st.button("Update",key=f"upd_{p["id"]}"):
+                ns = ec1.number_input("Stop-loss ($)",value=p['stop'],key=f"ns_{p['id']}",step=0.01)
+                nt = ec2.number_input("Target ($)",value=p['target'] or 0.0,key=f"nt_{p['id']}",step=0.01)
+                if st.button("Update",key=f"upd_{p['id']}"):
                     conn=db()
                     conn.execute("UPDATE portfolio SET stop_loss=?,target_price=? WHERE id=?",(ns,nt or None,p["id"]))
                     conn.commit(); conn.close()
                     st.success("Updated"); st.rerun()
-                if st.button(f"✕ Remove {p["ticker"]}",key=f"del_{p["id"]}"):
+                if st.button(f"✕ Remove {p['ticker']}",key=f"del_{p['id']}"):
                     conn=db()
                     conn.execute("UPDATE portfolio SET status='closed' WHERE id=?",(p["id"],))
                     conn.commit(); conn.close()
@@ -993,11 +993,11 @@ def tab_watchlist():
             # Earnings warning + key pills
             pills = ""
             if ed["days"] is not None and 0<=ed["days"]<=14:
-                pills += pill(f"⚡ Earnings {ed["days"]}d","a")
+                pills += pill(f"⚡ Earnings {ed['days']}d","a")
             if an.get("upside") and an["upside"]>10:
-                pills += pill(f"↑ {an["upside"]:+.0f}% analyst upside","g")
+                pills += pill(f"↑ {an['upside']:+.0f}% analyst upside","g")
             elif an.get("upside") and an["upside"]<-5:
-                pills += pill(f"↓ {an["upside"]:+.0f}% analyst target below price","r")
+                pills += pill(f"↓ {an['upside']:+.0f}% analyst target below price","r")
             if ins.get("net",0)>0:
                 pills += pill("Insider buying","g")
             elif ins.get("net",0)<-50000:
@@ -1257,7 +1257,7 @@ def tab_scanner():
                 return None
 
             # Filter 3 -- positive free cash flow
-            if not inf.get("fcf") or inf["fcf"] <= 0:
+            if not inf.get("fcf") or inf['fcf'] <= 0:
                 return None
 
             # Filter 4 -- analyst target upside
@@ -1409,15 +1409,15 @@ def tab_scanner():
                 analyses = []
                 prog2 = st.progress(0, text="Claude is analysing each candidate...")
                 for i, r in enumerate(mode1):
-                    prog2.progress((i+1)/len(mode1), text=f"Analysing {r["ticker"]} ({i+1}/{len(mode1)})...")
+                    prog2.progress((i+1)/len(mode1), text=f"Analysing {r['ticker']} ({i+1}/{len(mode1)})...")
                     an_q  = analyst_data(r["ticker"])
                     ins_q = insider_data(r["ticker"])
                     nws_q = news_data(r["ticker"])
                     # Pass extra context about valuation and entry timing to Claude
-                    enhanced_inf = dict(r["inf"])
-                    enhanced_inf["_rsi_context"]  = f"RSI is {r["rsi"]:.0f} -- in the healthy 40-68 range, not extended"
-                    enhanced_inf["_entry_context"] = f"Stock is {r["mo1m"]:+.1f}% over the past month, {'near 52W high -- check if justified' if r["near_hi"] else 'not near 52W high -- reasonable entry zone'}"
-                    enhanced_inf["_revision"]      = f"Earnings estimate trend: {r["revision"]}"
+                    enhanced_inf = dict(r['inf'])
+                    enhanced_inf['_rsi_context']  = f"RSI is {r['rsi']:.0f} -- in the healthy 40-68 range, not extended"
+                    enhanced_inf['_entry_context'] = f"Stock is {r['mo1m']:+.1f}% over the past month, {'near 52W high -- check if justified' if r['near_hi'] else 'not near 52W high -- reasonable entry zone'}"
+                    enhanced_inf['_revision']      = f"Earnings estimate trend: {r['revision']}"
                     verdict, text = ai_analysis(r["ticker"], enhanced_inf, an_q, ins_q, nws_q, mkt)
                     analyses.append({
                         "ticker":  r["ticker"],
@@ -1443,17 +1443,17 @@ def tab_scanner():
                     summary = []
                     for a in analyses:
                         summary.append(
-                            f"{a["ticker"]} ({a["name"]}): "
-                            f"Verdict={a["verdict"]}, "
-                            f"Upside={a["upside"]:+.1f}%, "
-                            f"EPS growth={a["eps_gr"]:.1f}%, "
-                            f"RSI={a["rsi"]:.0f}, "
-                            f"1M return={a["mo1m"]:+.1f}%, "
-                            f"Sector={a["sector"]}"
+                            f"{a['ticker']} ({a['name']}): "
+                            f"Verdict={a['verdict']}, "
+                            f"Upside={a['upside']:+.1f}%, "
+                            f"EPS growth={a['eps_gr']:.1f}%, "
+                            f"RSI={a['rsi']:.0f}, "
+                            f"1M return={a['mo1m']:+.1f}%, "
+                            f"Sector={a['sector']}"
                         )
                     rank_prompt = (
                         f"You have analysed {len(analyses)} quality growth stocks that all passed fundamental filters.\n\n"
-                        f"Market regime: {mkt.get('regime','Unknown')} | VIX: {vx} | Fear & Greed: {fg["val"]}\n\n"
+                        f"Market regime: {mkt.get('regime','Unknown')} | VIX: {vx} | Fear & Greed: {fg['val']}\n\n"
                         "Results:\n" + "\n".join(summary) + "\n\n"
                         "Select and rank the TOP 10 best buying opportunities RIGHT NOW. "
                         "Prioritise: BUY verdicts, highest conviction quality, sector diversification, "
@@ -1560,16 +1560,16 @@ def tab_scanner():
 
                 bc1,bc2 = st.columns(2)
                 with bc1:
-                    if st.button(f"➕ Add {a["ticker"]} to watchlist", key=f"fin_wl_{i}"):
+                    if st.button(f"➕ Add {a['ticker']} to watchlist", key=f"fin_wl_{i}"):
                         conn=db(); conn.execute("INSERT OR IGNORE INTO watchlist(ticker) VALUES(?)",(a["ticker"],)); conn.commit(); conn.close()
-                        st.success(f"Added {a["ticker"]} to watchlist")
+                        st.success(f"Added {a['ticker']} to watchlist")
                 with bc2:
                     if st.button(f"💼 Open position in portfolio", key=f"fin_port_{i}"):
                         conn=db()
                         conn.execute("INSERT INTO portfolio(ticker,shares,entry_price,entry_date,stop_loss,target_price,notes) VALUES(?,?,?,?,?,?,?)",
                             (a["ticker"],sz.get("shares",1),a["price"],str(datetime.date.today()),a["stop"],a["target"],"From scanner recommendation"))
                         conn.commit(); conn.close()
-                        st.success(f"Added {a["ticker"]} to portfolio with suggested stop and target")
+                        st.success(f"Added {a['ticker']} to portfolio with suggested stop and target")
 
                 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1704,17 +1704,17 @@ def tab_ai_advisor():
                     an  = analyst_data(p["ticker"])
                     upside = an.get("upside")
                     port_summary.append(
-                        f"{p["ticker"]} ({p["name"]}): {p["shares"]:.4f} shares, "
-                        f"entry ${p["entry"]:.2f}, current ${p["price"]:.2f}, "
-                        f"P&L {p["pnl_pct"]:+.1f}% (${p["pnl"]:+.2f}), "
-                        f"stop ${p["stop"]:.2f} ({p["stop_dist"]:.1f}% buffer), "
-                        f"{'⚠️ STOP BREACHED' if p["stop_status"]=='breached' else ''}"
-                        f"analyst target ${an["target"]:.2f} ({upside:+.1f}% upside)" if an.get("target") and upside else ""
+                        f"{p['ticker']} ({p['name']}): {p['shares']:.4f} shares, "
+                        f"entry ${p['entry']:.2f}, current ${p['price']:.2f}, "
+                        f"P&L {p['pnl_pct']:+.1f}% (${p['pnl']:+.2f}), "
+                        f"stop ${p['stop']:.2f} ({p['stop_dist']:.1f}% buffer), "
+                        f"{'⚠️ STOP BREACHED' if p['stop_status']=='breached' else ''}"
+                        f"analyst target ${an['target']:.2f} ({upside:+.1f}% upside)" if an.get("target") and upside else ""
                     )
 
                 wl_context = ""
                 if include_watchlist and not wl.empty:
-                    wl_context = f"\nWatchlist stocks being tracked: {', '.join(wl["ticker"].tolist())}"
+                    wl_context = f"\nWatchlist stocks being tracked: {', '.join(wl['ticker'].tolist())}"
 
                 prompt = f"""You are a plain-English portfolio advisor. A beginner investor has asked for a full brief.
 
@@ -1752,12 +1752,12 @@ Keep it practical and honest. If something is at risk, say so clearly."""
                         max_tokens=900,
                         messages=[{"role":"user","content":prompt}]
                     )
-                    st.session_state["full_brief"] = resp.content[0].text
+                    st.session_state['full_brief'] = resp.content[0].text
                 except Exception as e:
                     st.error(f"Error: {e}")
 
     if "full_brief" in st.session_state:
-        text = str(st.session_state["full_brief"])
+        text = str(st.session_state['full_brief'])
         st.markdown(
             f'<div class="card" style="border-left:4px solid #63B3ED">'
             f'<div style="font-size:0.9rem;line-height:1.8;color:#A0AEC0">'

@@ -1877,14 +1877,47 @@ def tab_settings():
                             value=st.session_state.get("alpha_vantage_key",""),type="password",
                             help="Free at alphavantage.co - no credit card needed")
         st.caption("Alpha Vantage adds earnings revision data - the strongest signal for finding stocks before they run.")
+        st.markdown("---")
+        st.markdown("**eToro API — live portfolio sync**")
+        st.caption("Connect your eToro account for automatic position sync. Read-only keys are sufficient.")
+        epk = st.text_input("eToro Public Key (x-api-key)",
+                             value=st.session_state.get("etoro_public_key",""),type="password",
+                             help="Found in eToro Settings > Trading > API Key Management")
+        euk = st.text_input("eToro User Key (x-user-key)",
+                             value=st.session_state.get("etoro_user_key",""),type="password",
+                             help="Generated alongside your Public Key in eToro")
+        if st.button("Test eToro connection", key="test_etoro"):
+            if epk and euk:
+                with st.spinner("Testing..."):
+                    import uuid
+                    headers = {"x-api-key":epk,"x-user-key":euk,"x-request-id":str(uuid.uuid4())}
+                    try:
+                        r = requests.get("https://public-api.etoro.com/api/v1/trading/info/real/pnl",
+                                         headers=headers, timeout=10)
+                        if r.status_code == 200:
+                            data = r.json()
+                            n = len(data.get("positions",[]))
+                            st.success(f"Connected successfully -- {n} open positions found in your eToro account!")
+                        elif r.status_code == 401:
+                            st.error("Invalid keys -- check your Public Key and User Key.")
+                        else:
+                            st.error(f"eToro API returned HTTP {r.status_code}")
+                    except Exception as e:
+                        st.error(f"Connection error: {e}")
+            else:
+                st.warning("Enter both keys before testing.")
         if st.button("💾 Save all settings",type="primary"):
-            st.session_state.account_size         = acc
-            st.session_state.max_risk_pct         = rsk
-            st.session_state.anthropic_key        = ak
-            st.session_state.finnhub_key          = fk
-            st.session_state["alpha_vantage_key"] = avk
+            st.session_state.account_size            = acc
+            st.session_state.max_risk_pct            = rsk
+            st.session_state.anthropic_key           = ak
+            st.session_state.finnhub_key             = fk
+            st.session_state["alpha_vantage_key"]    = avk
+            st.session_state["etoro_public_key"]     = epk
+            st.session_state["etoro_user_key"]       = euk
             save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,
-                      "finnhub_key":fk,"alpha_vantage_key":avk})
+                      "finnhub_key":fk,"alpha_vantage_key":avk,
+                      "etoro_public_key":epk,"etoro_user_key":euk})
+            st.success("All settings saved permanently!")
             save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,"finnhub_key":fk})
             st.success("✅ Saved permanently!")
 

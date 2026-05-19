@@ -711,8 +711,8 @@ def pos_size(account, risk_pct, price, stop):
 def fetch_etoro_positions():
     """
     Pull live positions directly from eToro API.
-    Returns list of positions with ticker, units, avg open, current P&L.
-    Requires both public key and user key (read-only is sufficient).
+    Handles the correct response structure: clientPortfolio.positions
+    Resolves instrument IDs to ticker symbols using the market-data search endpoint.
     """
     pub_key  = st.session_state.get("etoro_public_key","")
     user_key = st.session_state.get("etoro_user_key","")
@@ -720,47 +720,84 @@ def fetch_etoro_positions():
         return None, "Add your eToro API keys in Settings to enable live sync."
     try:
         import uuid
-        headers = {
-            "x-api-key":      pub_key,
-            "x-user-key":     user_key,
-            "x-request-id":   str(uuid.uuid4()),
-            "Content-Type":   "application/json",
-        }
+
+        def make_headers():
+            return {
+                "x-api-key":    pub_key,
+                "x-user-key":   user_key,
+                "x-request-id": str(uuid.uuid4()),
+            }
+
+        def resolve_ticker(instrument_id):
+            """Look up ticker symbol from eToro instrument ID."""
+            try:
+                r = requests.get(
+                    f"https://public-api.etoro.com/api/v1/market-data/instruments/{instrument_id}",
+                    headers=make_headers(), timeout=8
+                )
+                if r.status_code == 200:
+                    d = r.json()
+                    # Try multiple possible fields for the ticker
+                    symbol = (d.get("internalSymbolFull") or
+                              d.get("instrumentDisplayName") or
+                              d.get("symbolFull") or
+                              d.get("symbol") or
+                              str(instrument_id))
+                    return symbol.upper()
+            except Exception:
+                pass
+            return str(instrument_id)
+
         # Fetch positions
         resp = requests.get(
             "https://public-api.etoro.com/api/v1/trading/info/real/pnl",
-            headers=headers, timeout=10
+            headers=make_headers(), timeout=10
         )
         if resp.status_code == 401:
             return None, "Invalid eToro keys -- check your Public Key and User Key in Settings."
         if resp.status_code != 200:
             return None, f"eToro API error: HTTP {resp.status_code}"
+
         data = resp.json()
+
+        # Correct path: data -> clientPortfolio -> positions
+        client_portfolio = data.get("clientPortfolio", data)
+        raw_positions    = client_portfolio.get("positions", [])
+
         positions = []
-        for pos in data.get("positions", []):
+        for pos in raw_positions:
             try:
-                ticker = pos.get("instrumentId","")
-                # eToro uses instrument IDs -- map to ticker via their data
-                inst_data = pos.get("instrument", {})
-                symbol = inst_data.get("ticker", ticker) or str(ticker)
-                units  = float(pos.get("units", 0) or 0)
-                avg_open = float(pos.get("avgOpenRate", 0) or 0)
-                pnl = float(pos.get("unrealizedPnL", {}).get("pnL", 0) or 0)
-                current_rate = float(pos.get("currentRate", avg_open) or avg_open)
-                if units > 0 and avg_open > 0:
+                instrument_id = pos.get("instrumentID") or pos.get("instrumentId")
+                units         = float(pos.get("units", 0) or 0)
+                avg_open      = float(pos.get("openRate", 0) or 0)
+                stop_loss     = float(pos.get("stopLossRate", 0) or 0)
+                take_profit   = float(pos.get("takeProfitRate", 0) or 0)
+                pnl_data      = pos.get("unrealizedPnL", {})
+                pnl           = float(pnl_data.get("pnL", 0) or 0)
+                current_rate  = float(pnl_data.get("closeRate", avg_open) or avg_open)
+                open_date     = pos.get("openDateTime","")[:10] if pos.get("openDateTime") else ""
+
+                if units > 0 and avg_open > 0 and instrument_id:
+                    ticker = resolve_ticker(instrument_id)
                     positions.append({
-                        "ticker":      symbol.upper(),
-                        "units":       units,
-                        "avg_open":    avg_open,
-                        "current":     current_rate,
-                        "pnl":         round(pnl, 2),
-                        "pnl_pct":     round((current_rate/avg_open-1)*100, 2) if avg_open > 0 else 0,
-                        "value":       round(units * current_rate, 2),
-                        "cost":        round(units * avg_open, 2),
+                        "ticker":     ticker,
+                        "units":      units,
+                        "avg_open":   avg_open,
+                        "current":    current_rate,
+                        "stop_loss":  stop_loss if stop_loss > 0 else None,
+                        "take_profit":take_profit if take_profit > 0 else None,
+                        "pnl":        round(pnl, 2),
+                        "pnl_pct":    round((current_rate/avg_open-1)*100, 2) if avg_open > 0 else 0,
+                        "value":      round(units * current_rate, 2),
+                        "cost":       round(units * avg_open, 2),
+                        "open_date":  open_date,
+                        "instrument_id": instrument_id,
                     })
             except Exception:
                 continue
+
         return positions, None
+
     except requests.exceptions.Timeout:
         return None, "eToro API timed out -- try again in a moment."
     except Exception as e:

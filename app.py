@@ -1811,11 +1811,16 @@ def tab_settings():
                            help="Free tier at console.anthropic.com")
         fk = st.text_input("Finnhub API key (news headlines)",value=st.session_state.finnhub_key,type="password",
                            help="Free at finnhub.io")
+        avk = st.text_input("Alpha Vantage API key (earnings revisions)",
+                            value=st.session_state.get("alpha_vantage_key",""),type="password",
+                            help="Free at alphavantage.co - no credit card needed")
+        st.caption("Alpha Vantage adds earnings revision data - the strongest signal for finding stocks before they run.")
         if st.button("💾 Save all settings",type="primary"):
-            st.session_state.account_size  = acc
-            st.session_state.max_risk_pct  = rsk
-            st.session_state.anthropic_key = ak
-            st.session_state.finnhub_key   = fk
+            st.session_state.account_size         = acc
+            st.session_state.max_risk_pct         = rsk
+            st.session_state.anthropic_key        = ak
+            st.session_state.finnhub_key          = fk
+            st.session_state["alpha_vantage_key"] = avk
             save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,"finnhub_key":fk})
             st.success("✅ Saved permanently!")
 

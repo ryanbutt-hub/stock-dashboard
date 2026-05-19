@@ -1508,7 +1508,7 @@ def tab_scanner():
             rank_color = "#F6E05E" if i==0 else ("#C0C0C0" if i==1 else ("#CD7F32" if i==2 else "#4A5568"))
 
             with st.container():
-                st.markdown(f'<div class="{vs['css']}">', unsafe_allow_html=True)
+                css_cls = vs["css"]; st.markdown(f'<div class="{css_cls}">', unsafe_allow_html=True)
 
                 h1,h2,h3 = st.columns([4,3,3])
                 with h1:

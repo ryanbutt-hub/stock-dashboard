@@ -107,7 +107,7 @@ hr{border-color:#1A2540!important;}
 CONFIG = pathlib.Path.home() / "stock-dashboard" / "advisor_config.json"
 
 def load_cfg():
-    d = {"anthropic_key":"","finnhub_key":"","account_size":3000.0,"max_risk_pct":1.0}
+    d = {"anthropic_key":"","finnhub_key":"","alpha_vantage_key":"","account_size":3000.0,"max_risk_pct":1.0}
     try:
         if CONFIG.exists():
             d.update(json.loads(CONFIG.read_text()))
@@ -176,6 +176,9 @@ for k,v in {
     "paused":        False,
     "scanner_results": [],
     "scanner_ts":    0,
+    "alpha_vantage_key": _cfg.get("alpha_vantage_key",""),
+    "mode1_results": [],
+    "final_recommendations": [],
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -1155,7 +1158,14 @@ def tab_watchlist():
 # ── TAB: SCANNER ──────────────────────────────────────────────
 def tab_scanner():
     st.markdown("## 🔭 Market Scanner")
-    st.caption("Scans 180+ stocks to find setups showing strong signals. Runs on demand, cached 4 hours.")
+    st.caption(
+        "Two-stage process: Mode 1 filters 180+ stocks using quality metrics. "
+        "Mode 2 sends the best candidates to Claude for full AI analysis. "
+        "Final list = Claude's top 10 with entry levels and position sizes."
+    )
+
+    # Alpha Vantage key check
+    av_key = st.session_state.get("alpha_vantage_key","")
 
     UNIVERSE = list(dict.fromkeys([
         "AAPL","MSFT","NVDA","AVGO","ORCL","CRM","AMD","QCOM","TXN","AMAT",
@@ -1167,154 +1177,402 @@ def tab_scanner():
         "CAT","BA","HON","UPS","RTX","LMT","GE","DE","FDX","CSX",
         "XOM","CVX","COP","EOG","SLB","HAL","MPC","PSX","OXY","DVN",
         "PG","KO","PEP","COST","WMT","PM","MO","CL","GIS","KHC",
-        "CVS","ELV","HUM","CI","MCK","ABT","ZTS","IDXX","DXCM","PODD",
+        "CVS","ELV","HUM","CI","MCK","ZTS","IDXX","DXCM","PODD",
         "NEE","DUK","SO","PLD","AMT","EQIX","CCI","PSA","O","SPG",
-        "SPY","QQQ","IWM","GLD","TLT","HYG","XLK","XLF","XLE","XLV",
-        "COIN","MARA","RIOT","IBIT","BITO","ARKK","NIO","RIVN","LCID","F",
+        "COIN","MARA","RIOT","IBIT","NIO","RIVN","F","GM",
         "BABA","JD","PDD","TSM","ARM","DELL","HPQ","WDC","STX","ANET",
+        "ADBE","PYPL","INTU","LULU","MNST","MELI","NXPI","WDAY","TEAM",
+        "SNOW","OKTA","MDB","HOOD","ZM","DOCU","PINS","ETSY","ABNB","U",
     ]))
 
-    last_run = st.session_state.scanner_ts
-    if last_run:
-        age = (time.time()-last_run)/3600
-        st.caption(f"Last scan: {datetime.datetime.fromtimestamp(last_run).strftime('%H:%M:%S')}  -  {age:.1f}h ago")
+    # ── Sector P/E benchmarks for valuation check ──
+    SECTOR_PE = {
+        "Technology": 30, "Healthcare": 25, "Communication Services": 28,
+        "Consumer Cyclical": 22, "Consumer Defensive": 20, "Financials": 16,
+        "Industrials": 20, "Energy": 15, "Materials": 18,
+        "Real Estate": 35, "Utilities": 18, "Unknown": 22,
+    }
 
-    fc1,fc2,fc3 = st.columns(3)
-    min_score = fc1.slider("Min signal score",10,60,20,5)
-    sort_by   = fc2.selectbox("Sort by",["Signal Score","1M Return %","Volume Spike","RSI"])
-    max_show  = fc3.slider("Max results",10,100,40,10)
+    def get_alpha_vantage_revision(ticker, av_key):
+        """
+        Fetch earnings estimate revision trend from Alpha Vantage.
+        Rising estimates = institutional money likely accumulating.
+        Returns: positive, negative, or neutral
+        """
+        if not av_key:
+            return "unknown"
+        try:
+            url = (f"https://www.alphavantage.co/query?function=EARNINGS"
+                   f"&symbol={ticker}&apikey={av_key}")
+            r = requests.get(url, timeout=8)
+            data = r.json()
+            # Check if estimates are available
+            quarterly = data.get("quarterlyEarnings", [])
+            if len(quarterly) >= 2:
+                recent  = quarterly[0]
+                prior   = quarterly[1]
+                est_r   = float(recent.get("estimatedEPS", 0) or 0)
+                est_p   = float(prior.get("estimatedEPS", 0) or 0)
+                if est_r > est_p * 1.05:
+                    return "rising"
+                elif est_r < est_p * 0.95:
+                    return "falling"
+            return "flat"
+        except Exception:
+            return "unknown"
 
-    if st.button("🔭 Run Scan", type="primary"):
-        results = []
-        prog = st.progress(0)
-        for i,tk in enumerate(UNIVERSE):
-            prog.progress((i+1)/len(UNIVERSE), text=f"Scanning {tk}…")
-            try:
-                df = prices(tk,"3mo")
-                if df is None or len(df)<20:
-                    time.sleep(0.1); continue
-                c=df["Close"]; v=df["Volume"]
-                px=float(c.iloc[-1])
-                e20=float(c.ewm(span=20,adjust=False).mean().iloc[-1])
-                e50=float(c.ewm(span=50,adjust=False).mean().iloc[-1])
-                ema50=c.ewm(span=50,adjust=False).mean()
-                delta=c.diff()
-                gain=delta.clip(lower=0).ewm(com=13,adjust=False).mean()
-                loss=(-delta).clip(lower=0).ewm(com=13,adjust=False).mean()
-                rsi=float((100-(100/(1+gain/loss.replace(0,np.nan)))).iloc[-1])
-                e12=c.ewm(span=12,adjust=False).mean(); e26=c.ewm(span=26,adjust=False).mean()
-                macd=e12-e26; sig=macd.ewm(span=9,adjust=False).mean()
-                macd_bull=bool(macd.iloc[-1]>sig.iloc[-1])
-                macd_cross=bool(len(c)>=2 and macd.iloc[-2]<sig.iloc[-2] and macd.iloc[-1]>sig.iloc[-1])
-                avg_v=float(v.rolling(20).mean().iloc[-1])
-                vr=float(v.iloc[-1]/avg_v) if avg_v>0 else 1.0
-                mo1m=float((px/c.iloc[-21]-1)*100) if len(c)>=21 else 0
-                mo1w=float((px/c.iloc[-5]-1)*100) if len(c)>=5 else 0
-                hi52=float(c.max())
-                near_hi=bool(px>=hi52*0.95)
-                uptrend=bool(px>e20 and px>e50)
-                signals=[]; ss=0
-                if uptrend and rsi>50 and macd_bull: signals.append("🟢 Uptrend"); ss+=30
-                if vr>2.0:                           signals.append(f"🔊 Vol {vr:.1f}×"); ss+=20
-                if near_hi and mo1m>5:               signals.append("🏔 Near 52W high"); ss+=20
-                if macd_cross:                       signals.append("⚡ MACD cross"); ss+=15
-                if mo1m>15:                          signals.append(f"🚀 +{mo1m:.1f}% 1M"); ss+=15
-                if ss>0:
-                    results.append({"ticker":tk,"price":round(px,2),"rsi":round(rsi,1),
-                                    "vr":round(vr,2),"mo1m":round(mo1m,2),"mo1w":round(mo1w,2),
-                                    "near_hi":near_hi,"uptrend":uptrend,"signals":signals,"score":ss})
-            except Exception: pass
-            time.sleep(0.1)
-        prog.empty()
-        st.session_state.scanner_results = results
-        st.session_state.scanner_ts = time.time()
-        st.success(f"✅ Scan complete  -  {len(results)} opportunities found")
+    def mode1_quality_filter(ticker, av_key):
+        """
+        MODE 1 — Quality Growth at a Reasonable Price filter.
+        Returns the stock data if it passes ALL criteria.
+        Returns None if it fails any critical filter.
 
-    results = st.session_state.scanner_results
-    if not results:
-        st.info("Click Run Scan to find opportunities across the market. Takes 5-15 minutes.")
-        return
+        Criteria:
+        - EPS growth > 10% (company growing earnings)
+        - Forward P/E below 1.4x sector average (not overpaying)
+        - Positive free cash flow (real cash generation)
+        - RSI between 40-68 (building momentum, NOT extended)
+        - Price above 50-day moving average (uptrend confirmed)
+        - Analyst price target at least 12% above current price
+        - NOT within 3% of 52-week high (unless RSI < 60)
+        - Earnings estimates flat or rising (Alpha Vantage if available)
+        """
+        try:
+            inf = info(ticker)
+            if not inf or not inf.get("price"):
+                return None
 
-    filtered = [r for r in results if r["score"]>=min_score]
-    sk = {"Signal Score":lambda x:x["score"],"1M Return %":lambda x:x["mo1m"],
-          "Volume Spike":lambda x:x["vr"],"RSI":lambda x:x["rsi"]}
-    filtered = sorted(filtered, key=sk[sort_by], reverse=True)[:max_show]
+            price   = inf.get("price")
+            sector  = inf.get("sector", "Unknown")
+            pe_lim  = SECTOR_PE.get(sector, 22) * 1.4
 
-    if not filtered:
-        st.warning(f"No results with score ≥ {min_score}. Lower the filter.")
-        return
+            # Filter 1 -- earnings growth
+            eps_gr = inf.get("eps_gr") or inf.get("rev_gr")
+            if not eps_gr or eps_gr < 0.08:
+                return None
 
-    st.markdown(f'<div class="sec">{len(filtered)} Opportunities</div>', unsafe_allow_html=True)
+            # Filter 2 -- valuation (forward P/E vs sector)
+            fwd_pe = inf.get("fwd_pe")
+            if fwd_pe and fwd_pe > pe_lim:
+                return None
 
-    # Table
-    rows = []
-    for r in filtered:
-        inf_q = info(r["ticker"])
-        rows.append({
-            "Ticker":       r["ticker"],
-            "Company":      inf_q.get("name",r["ticker"])[:25] if inf_q else r["ticker"],
-            "Price":        f'${r["price"]:.2f}',
-            "Score":        r["score"],
-            "1M Return":    f'{r["mo1m"]:+.1f}%',
-            "Volume":       f'{r["vr"]:.1f}×',
-            "RSI":          r["rsi"],
-            "52W High":     "✅" if r["near_hi"] else "",
-            "Key Signal":   r["signals"][0] if r["signals"] else "",
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                 column_config={"Score":st.column_config.ProgressColumn("Score",min_value=0,max_value=80,format="%d")})
+            # Filter 3 -- positive free cash flow
+            if not inf.get("fcf") or inf["fcf"] <= 0:
+                return None
 
-    # Add to watchlist
-    ac1,ac2 = st.columns([3,1])
-    add_tk = ac1.selectbox("Add to watchlist:",[" - "]+[r["ticker"] for r in filtered])
-    if ac2.button("➕ Add") and add_tk!=" - ":
-        conn=db(); conn.execute("INSERT OR IGNORE INTO watchlist(ticker) VALUES(?)",(add_tk,)); conn.commit(); conn.close()
-        st.success(f"Added {add_tk}")
+            # Filter 4 -- analyst target upside
+            target = inf.get("target")
+            if not target:
+                return None
+            upside = (target / price - 1) * 100
+            if upside < 12:
+                return None
 
-    # Top 10 cards
-    st.markdown('<div class="sec">Top 10  -  with AI Quick Take</div>', unsafe_allow_html=True)
-    mkt = market_data()
-    for r in filtered[:10]:
-        color = "#00E676" if r["score"]>=50 else ("#F6AD55" if r["score"]>=30 else "#F56565")
-        css   = "verdict-buy" if r["score"]>=50 else ("verdict-wait" if r["score"]>=30 else "verdict-avoid")
-        with st.container():
-            st.markdown(f'<div class="{css}">', unsafe_allow_html=True)
-            c1,c2,c3 = st.columns([3,2,2])
-            with c1:
-                st.markdown(f'<div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;color:{color}">{r["ticker"]}</div>', unsafe_allow_html=True)
-                st.markdown(" ".join([f'<span class="pill p-g">{s}</span>' for s in r["signals"]]), unsafe_allow_html=True)
-            with c2:
-                st.markdown(f'<div style="text-align:center"><div style="font-family:IBM Plex Mono;font-size:2rem;font-weight:600;color:{color}">{r["score"]}</div><div style="font-size:0.62rem;color:#4A5568;text-transform:uppercase">Signal Score</div></div>', unsafe_allow_html=True)
-            with c3:
-                mc = "#00E676" if r["mo1m"]>=0 else "#F56565"
-                st.markdown(f'<div style="text-align:right"><div style="font-family:IBM Plex Mono;font-size:1.2rem;color:#EDF2F7">${r["price"]:.2f}</div><div style="color:{mc};font-size:0.8rem">{"▲" if r["mo1m"]>=0 else "▼"} {abs(r["mo1m"]):.1f}% 1M</div></div>', unsafe_allow_html=True)
-            bc1,bc2 = st.columns(2)
-            with bc1:
-                if st.button(f"➕ Add {r['ticker']} to watchlist",key=f"sc_wl_{r['ticker']}"):
-                    conn=db(); conn.execute("INSERT OR IGNORE INTO watchlist(ticker) VALUES(?)",(r["ticker"],)); conn.commit(); conn.close()
-                    st.success(f"Added {r['ticker']}")
-            with bc2:
-                if st.button(f"🤖 AI take on {r['ticker']}",key=f"sc_ai_{r['ticker']}",type="primary"):
-                    with st.spinner("Analysing…"):
-                        inf_q=info(r["ticker"]); an_q=analyst_data(r["ticker"])
-                        ins_q=insider_data(r["ticker"]); nws_q=news_data(r["ticker"])
-                        verdict,text = ai_analysis(r["ticker"],inf_q,an_q,ins_q,nws_q,mkt)
-                        st.session_state[f"sc_ai_r_{r['ticker']}"] = {"verdict":verdict,"text":text}
-            if f"sc_ai_r_{r['ticker']}" in st.session_state:
-                v = st.session_state[f"sc_ai_r_{r['ticker']}"]["verdict"]
-                t = st.session_state[f"sc_ai_r_{r['ticker']}"]["text"]
-                vs = get_vs(v)
-                st.markdown(
-                    f'<div style="margin-top:10px;padding:14px;background:rgba(0,0,0,0.2);border-radius:8px">'
-                    f'<div style="font-family:Syne,sans-serif;font-weight:800;color:{vs["color"]};margin-bottom:6px">'
-                    f'{vs["emoji"]} {v}</div>'
-                    f'<div style="font-size:0.85rem;line-height:1.7;color:#A0AEC0">{str(t).replace(chr(10),"<br>")}</div>'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
-            st.markdown('</div>', unsafe_allow_html=True)
+            # Filter 5 -- technical: price above 50d, RSI 40-68
+            df = prices(ticker, "3mo")
+            if df is None or len(df) < 50:
+                return None
+            df = indicators(df.copy())
+            last  = df.iloc[-1]
+            px    = float(last["Close"])
+            e50   = float(last["E50"]) if "E50" in df.columns else None
+            rsi   = float(last["RSI"]) if "RSI" in df.columns else 50
+            hi52  = float(df["Close"].max())
+            vr    = float(last["VR"]) if "VR" in df.columns else 1.0
+            macd_bull = float(last.get("MACD",0)) > float(last.get("SIG",0))
+            atr   = float(last["ATR"]) if "ATR" in df.columns else px * 0.02
 
-# ── TAB: MARKET HEALTH ────────────────────────────────────────
+            if e50 and px < e50:
+                return None   # Must be in uptrend
+            if rsi < 38 or rsi > 68:
+                return None   # Not extended, not oversold
+            near_52w_hi = px >= hi52 * 0.97
+            if near_52w_hi and rsi > 60:
+                return None   # Avoid chasing extended breakouts
+
+            # Filter 6 -- Alpha Vantage revision check
+            revision = "unknown"
+            if av_key:
+                revision = get_alpha_vantage_revision(ticker, av_key)
+                if revision == "falling":
+                    return None  # Analysts cutting estimates = bad signal
+
+            # Calculate suggested stop and position
+            stop  = round(px - 1.5 * atr, 2)
+            mo1m  = float((px/df["Close"].iloc[-21]-1)*100) if len(df)>=21 else 0
+            mo1w  = float((px/df["Close"].iloc[-5]-1)*100)  if len(df)>=5  else 0
+
+            return {
+                "ticker":    ticker,
+                "name":      inf.get("name", ticker),
+                "sector":    sector,
+                "price":     round(px, 2),
+                "upside":    round(upside, 1),
+                "target":    round(target, 2),
+                "fwd_pe":    round(fwd_pe, 1) if fwd_pe else None,
+                "pe_limit":  round(pe_lim, 1),
+                "eps_gr":    round(eps_gr*100, 1),
+                "rsi":       round(rsi, 1),
+                "vr":        round(vr, 2),
+                "mo1m":      round(mo1m, 2),
+                "mo1w":      round(mo1w, 2),
+                "stop":      stop,
+                "atr":       round(atr, 2),
+                "macd_bull": macd_bull,
+                "near_hi":   near_52w_hi,
+                "revision":  revision,
+                "inf":       inf,
+                "df":        df,
+            }
+        except Exception:
+            return None
+
+    # ── UI ──
+    st.markdown('<div class="sec">Step 1 -- Mode 1: Quality Growth Filter</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="a-blue" style="margin-bottom:12px">' +
+        '<strong>What Mode 1 looks for:</strong> Stocks with growing earnings (EPS >8%), ' +
+        'reasonable valuation (Forward P/E below sector average), positive cash flow, ' +
+        'RSI between 40-68 (building momentum but NOT extended), analyst target at ' +
+        'least 12% above current price, and price in an uptrend. ' +
+        'This finds stocks <em>before</em> they run, not after.</div>',
+        unsafe_allow_html=True
+    )
+
+    if not av_key:
+        st.markdown(
+            '<div class="a-amber">Add your Alpha Vantage API key in Settings to enable ' +
+            'earnings revision filtering (the strongest signal). ' +
+            'The scan will still run without it but may include stocks with falling estimates.</div>',
+            unsafe_allow_html=True
+        )
+
+    if st.button("🔍 Run Mode 1 -- Quality Growth Scan", type="primary", key="run_mode1"):
+        candidates = []
+        prog = st.progress(0, text="Scanning for quality growth stocks...")
+        status = st.empty()
+        for i, tk in enumerate(UNIVERSE):
+            prog.progress((i+1)/len(UNIVERSE), text=f"Checking {tk} ({i+1}/{len(UNIVERSE)})...")
+            result = mode1_quality_filter(tk, av_key)
+            if result:
+                candidates.append(result)
+                status.success(f"Found {len(candidates)} quality candidates so far...")
+            time.sleep(0.15)
+        prog.empty(); status.empty()
+        # Sort by upside potential
+        candidates = sorted(candidates, key=lambda x: x["upside"], reverse=True)
+        st.session_state["mode1_results"] = candidates
+        st.success(f"Mode 1 complete -- {len(candidates)} stocks passed all quality filters from {len(UNIVERSE)} scanned")
+
+    # Display Mode 1 results
+    mode1 = st.session_state.get("mode1_results", [])
+    if mode1:
+        st.markdown(f'<div class="sec">{len(mode1)} Stocks Passed Quality Filters</div>', unsafe_allow_html=True)
+
+        rows = []
+        for r in mode1:
+            rows.append({
+                "Ticker":      r["ticker"],
+                "Company":     r["name"][:25],
+                "Sector":      r["sector"],
+                "Price":       f'${r["price"]:.2f}',
+                "Analyst Target": f'${r["target"]:.2f}',
+                "Upside":      f'{r["upside"]:+.1f}%',
+                "Fwd P/E":     r["fwd_pe"] or "N/A",
+                "EPS Growth":  f'{r["eps_gr"]:.1f}%',
+                "RSI":         r["rsi"],
+                "1M Return":   f'{r["mo1m"]:+.1f}%',
+                "Revision":    r["revision"].upper(),
+                "MACD":        "Bull" if r["macd_bull"] else "Bear",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown('<div class="sec">Step 2 -- Mode 2: Claude AI Deep Analysis</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="a-blue" style="margin-bottom:12px">' +
+            '<strong>What Mode 2 does:</strong> Takes every stock that passed Mode 1 and sends ' +
+            'it to Claude with full data -- fundamentals, insider activity, analyst consensus, ' +
+            'news sentiment, and market context. Claude asks: "Is this a good entry point ' +
+            'at this price right now?" Not just "is it a good company?" ' +
+            'Then ranks them and produces a final top 10 with entry levels and position sizes.</div>',
+            unsafe_allow_html=True
+        )
+
+        if not st.session_state.anthropic_key:
+            st.error("Add your Anthropic API key in Settings to run Mode 2.")
+        else:
+            if st.button("🤖 Run Mode 2 -- Claude AI Analysis", type="primary", key="run_mode2"):
+                mkt  = market_data()
+                vx   = vix()
+                fg   = fear_greed()
+                analyses = []
+                prog2 = st.progress(0, text="Claude is analysing each candidate...")
+                for i, r in enumerate(mode1):
+                    prog2.progress((i+1)/len(mode1), text=f"Analysing {r['ticker']} ({i+1}/{len(mode1)})...")
+                    an_q  = analyst_data(r["ticker"])
+                    ins_q = insider_data(r["ticker"])
+                    nws_q = news_data(r["ticker"])
+                    # Pass extra context about valuation and entry timing to Claude
+                    enhanced_inf = dict(r["inf"])
+                    enhanced_inf["_rsi_context"]  = f"RSI is {r['rsi']:.0f} -- in the healthy 40-68 range, not extended"
+                    enhanced_inf["_entry_context"] = f"Stock is {r['mo1m']:+.1f}% over the past month, {'near 52W high -- check if justified' if r['near_hi'] else 'not near 52W high -- reasonable entry zone'}"
+                    enhanced_inf["_revision"]      = f"Earnings estimate trend: {r['revision']}"
+                    verdict, text = ai_analysis(r["ticker"], enhanced_inf, an_q, ins_q, nws_q, mkt)
+                    analyses.append({
+                        "ticker":  r["ticker"],
+                        "name":    r["name"],
+                        "sector":  r["sector"],
+                        "price":   r["price"],
+                        "upside":  r["upside"],
+                        "target":  r["target"],
+                        "stop":    r["stop"],
+                        "atr":     r["atr"],
+                        "eps_gr":  r["eps_gr"],
+                        "rsi":     r["rsi"],
+                        "mo1m":    r["mo1m"],
+                        "verdict": verdict,
+                        "text":    text,
+                    })
+                    time.sleep(0.3)
+                prog2.empty()
+
+                # Ask Claude to rank and select top 10
+                try:
+                    client = anthropic.Anthropic(api_key=st.session_state.anthropic_key)
+                    summary = []
+                    for a in analyses:
+                        summary.append(
+                            f"{a['ticker']} ({a['name']}): "
+                            f"Verdict={a['verdict']}, "
+                            f"Upside={a['upside']:+.1f}%, "
+                            f"EPS growth={a['eps_gr']:.1f}%, "
+                            f"RSI={a['rsi']:.0f}, "
+                            f"1M return={a['mo1m']:+.1f}%, "
+                            f"Sector={a['sector']}"
+                        )
+                    rank_prompt = (
+                        f"You have analysed {len(analyses)} quality growth stocks that all passed fundamental filters.\n\n"
+                        f"Market regime: {mkt.get('regime','Unknown')} | VIX: {vx} | Fear & Greed: {fg['val']}\n\n"
+                        "Results:\n" + "\n".join(summary) + "\n\n"
+                        "Select and rank the TOP 10 best buying opportunities RIGHT NOW. "
+                        "Prioritise: BUY verdicts, highest conviction quality, sector diversification, "
+                        "reasonable RSI (not extended), strong earnings growth, and alignment with current market regime. "
+                        "Avoid clustering too many stocks in the same sector. "
+                        "Reply with ONLY a comma-separated list of exactly 10 ticker symbols, best first. "
+                        "Example: AAPL,MSFT,NVDA,..."
+                    )
+                    resp = client.messages.create(
+                        model="claude-sonnet-4-6", max_tokens=80,
+                        messages=[{"role":"user","content":rank_prompt}]
+                    )
+                    ranked_tks = [t.strip().upper() for t in resp.content[0].text.strip().split(",")][:10]
+                    ranked = []
+                    for tk in ranked_tks:
+                        match = next((a for a in analyses if a["ticker"]==tk), None)
+                        if match:
+                            ranked.append(match)
+                    for a in analyses:
+                        if len(ranked) >= 10: break
+                        if not any(r["ticker"]==a["ticker"] for r in ranked):
+                            if a["verdict"] == "BUY":
+                                ranked.append(a)
+                    st.session_state["final_recommendations"] = ranked
+                    st.success(f"Mode 2 complete -- Claude has selected the top {len(ranked)} opportunities")
+                except Exception as e:
+                    st.error(f"Ranking error: {e}")
+                    buys = [a for a in analyses if a["verdict"]=="BUY"]
+                    st.session_state["final_recommendations"] = (buys + [a for a in analyses if a["verdict"]!="BUY"])[:10]
+
+    # ── FINAL RECOMMENDATIONS ──
+    final = st.session_state.get("final_recommendations", [])
+    if final:
+        st.divider()
+        st.markdown('<div class="sec">Final Recommendations -- Claudes Top Picks</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="a-green" style="margin-bottom:16px">' +
+            f'These ' + str(len(final)) + ' stocks passed every quality filter AND received Claudes highest conviction rating. ' +
+            'Each includes a suggested entry level, stop-loss, and position size based on your account.</div>',
+            unsafe_allow_html=True
+        )
+
+        account  = st.session_state.account_size
+        risk_pct = st.session_state.max_risk_pct
+
+        for i, a in enumerate(final):
+            v  = a.get("verdict","WAIT")
+            vs = get_vs(v)
+            sz = pos_size(account, risk_pct, a["price"], a["stop"])
+            rr = (a["target"]-a["price"])/(a["price"]-a["stop"]) if a["stop"] < a["price"] else None
+
+            rank_color = "#F6E05E" if i==0 else ("#C0C0C0" if i==1 else ("#CD7F32" if i==2 else "#4A5568"))
+
+            with st.container():
+                st.markdown(f'<div class="{vs['css']}">', unsafe_allow_html=True)
+
+                h1,h2,h3 = st.columns([4,3,3])
+                with h1:
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
+                        f'<div style="font-family:Syne,sans-serif;font-size:1.6rem;font-weight:800;color:{rank_color}">#{i+1}</div>' +
+                        f'<div><div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;color:{vs['color']}">{a['ticker']} - {vs['emoji']} {v}</div>' +
+                        f'<div style="font-size:0.72rem;color:#4A5568">{a['name']} | {a['sector']}</div></div>' +
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                    mc = "#00E676" if a["mo1m"]>=0 else "#F56565"
+                    st.markdown(
+                        f'<span class="pill p-b">RSI {a['rsi']:.0f}</span>' +
+                        f'<span class="pill p-g">EPS +{a['eps_gr']:.1f}%</span>' +
+                        f'<span class="pill p-g">{a['upside']:+.1f}% to target</span>',
+                        unsafe_allow_html=True
+                    )
+
+                with h2:
+                    st.markdown(
+                        f'<div style="font-size:0.65rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px">Trade Levels</div>' +
+                        f'<div style="font-family:IBM Plex Mono;font-size:0.85rem;line-height:1.8;color:#A0AEC0">' +
+                        f'<span style="color:#EDF2F7">Current:</span> ${a['price']:.2f}<br>' +
+                        f'<span style="color:#00E676">Target:</span> ${a['target']:.2f} ({a['upside']:+.1f}%)<br>' +
+                        f'<span style="color:#F56565">Stop-loss:</span> ${a['stop']:.2f}<br>' +
+                        f'{"<span style=color:#F6AD55>R:R ratio:</span> 1:" + str(round(rr,1)) + "<br>" if rr else ""}' +
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+                with h3:
+                    if sz:
+                        st.markdown(
+                            f'<div style="font-size:0.65rem;color:#4A5568;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:6px">Position Size (${account:,.0f} account)</div>' +
+                            f'<div style="font-family:IBM Plex Mono;font-size:0.85rem;line-height:1.8;color:#A0AEC0">' +
+                            f'<span style="color:#EDF2F7">Shares:</span> {sz["shares"]}<br>' +
+                            f'<span style="color:#EDF2F7">Cost:</span> ${sz["total_cost"]:,.0f} ({sz["pct_account"]:.1f}%)<br>' +
+                            f'<span style="color:#F56565">Max loss:</span> -${sz["dollar_risk"]:,.0f}<br>' +
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+
+                with st.expander("Read full AI analysis"):
+                    st.markdown(
+                        f'<div style="font-size:0.88rem;line-height:1.8;color:#A0AEC0">{str(a["text"]).replace(chr(10),"<br>")}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                bc1,bc2 = st.columns(2)
+                with bc1:
+                    if st.button(f"➕ Add {a['ticker']} to watchlist", key=f"fin_wl_{i}"):
+                        conn=db(); conn.execute("INSERT OR IGNORE INTO watchlist(ticker) VALUES(?)",(a["ticker"],)); conn.commit(); conn.close()
+                        st.success(f"Added {a['ticker']} to watchlist")
+                with bc2:
+                    if st.button(f"💼 Open position in portfolio", key=f"fin_port_{i}"):
+                        conn=db()
+                        conn.execute("INSERT INTO portfolio(ticker,shares,entry_price,entry_date,stop_loss,target_price,notes) VALUES(?,?,?,?,?,?,?)",
+                            (a["ticker"],sz.get("shares",1),a["price"],str(datetime.date.today()),a["stop"],a["target"],"From scanner recommendation"))
+                        conn.commit(); conn.close()
+                        st.success(f"Added {a['ticker']} to portfolio with suggested stop and target")
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
 def tab_market():
     st.markdown("## 🌍 Market Health")
     st.caption("Check this first every day before looking at individual stocks.")

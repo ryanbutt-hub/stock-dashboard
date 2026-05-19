@@ -1515,16 +1515,16 @@ def tab_scanner():
                     st.markdown(
                         f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">' +
                         f'<div style="font-family:Syne,sans-serif;font-size:1.6rem;font-weight:800;color:{rank_color}">#{i+1}</div>' +
-                        f'<div><div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;color:{vs['color']}">{a['ticker']} - {vs['emoji']} {v}</div>' +
-                        f'<div style="font-size:0.72rem;color:#4A5568">{a['name']} | {a['sector']}</div></div>' +
+                        f'<div><div style="font-family:Syne,sans-serif;font-size:1.1rem;font-weight:800;color:{vs["color"]}">{a["ticker"]} - {vs["emoji"]} {v}</div>' +
+                        f'<div style="font-size:0.72rem;color:#4A5568">{a["name"]} | {a["sector"]}</div></div>' +
                         f'</div>',
                         unsafe_allow_html=True
                     )
                     mc = "#00E676" if a["mo1m"]>=0 else "#F56565"
                     st.markdown(
-                        f'<span class="pill p-b">RSI {a['rsi']:.0f}</span>' +
-                        f'<span class="pill p-g">EPS +{a['eps_gr']:.1f}%</span>' +
-                        f'<span class="pill p-g">{a['upside']:+.1f}% to target</span>',
+                        f'<span class="pill p-b">RSI {a["rsi"]:.0f}</span>' +
+                        f'<span class="pill p-g">EPS +{a["eps_gr"]:.1f}%</span>' +
+                        f'<span class="pill p-g">{a["upside"]:+.1f}% to target</span>',
                         unsafe_allow_html=True
                     )
 

@@ -107,7 +107,7 @@ hr{border-color:#1A2540!important;}
 CONFIG = pathlib.Path.home() / "stock-dashboard" / "advisor_config.json"
 
 def load_cfg():
-    d = {"anthropic_key":"","finnhub_key":"","alpha_vantage_key":"","account_size":3000.0,"max_risk_pct":1.0}
+    d = {"anthropic_key":"","finnhub_key":"","alpha_vantage_key":"","etoro_public_key":"","etoro_user_key":"","account_size":3000.0,"max_risk_pct":1.0}
     try:
         if CONFIG.exists():
             d.update(json.loads(CONFIG.read_text()))
@@ -176,7 +176,9 @@ for k,v in {
     "paused":        False,
     "scanner_results": [],
     "scanner_ts":    0,
-    "alpha_vantage_key": _cfg.get("alpha_vantage_key",""),
+    "alpha_vantage_key":  _cfg.get("alpha_vantage_key",""),
+    "etoro_public_key":   _cfg.get("etoro_public_key",""),
+    "etoro_user_key":     _cfg.get("etoro_user_key",""),
     "mode1_results": [],
     "final_recommendations": [],
 }.items():
@@ -704,6 +706,66 @@ def pos_size(account, risk_pct, price, stop):
             "pct_account":round(tc/account*100,1)}
 
 # ── TAB: PORTFOLIO ────────────────────────────────────────────
+
+# -- eToro API sync ------------------------------------------
+def fetch_etoro_positions():
+    """
+    Pull live positions directly from eToro API.
+    Returns list of positions with ticker, units, avg open, current P&L.
+    Requires both public key and user key (read-only is sufficient).
+    """
+    pub_key  = st.session_state.get("etoro_public_key","")
+    user_key = st.session_state.get("etoro_user_key","")
+    if not pub_key or not user_key:
+        return None, "Add your eToro API keys in Settings to enable live sync."
+    try:
+        import uuid
+        headers = {
+            "x-api-key":      pub_key,
+            "x-user-key":     user_key,
+            "x-request-id":   str(uuid.uuid4()),
+            "Content-Type":   "application/json",
+        }
+        # Fetch positions
+        resp = requests.get(
+            "https://public-api.etoro.com/api/v1/trading/info/real/pnl",
+            headers=headers, timeout=10
+        )
+        if resp.status_code == 401:
+            return None, "Invalid eToro keys -- check your Public Key and User Key in Settings."
+        if resp.status_code != 200:
+            return None, f"eToro API error: HTTP {resp.status_code}"
+        data = resp.json()
+        positions = []
+        for pos in data.get("positions", []):
+            try:
+                ticker = pos.get("instrumentId","")
+                # eToro uses instrument IDs -- map to ticker via their data
+                inst_data = pos.get("instrument", {})
+                symbol = inst_data.get("ticker", ticker) or str(ticker)
+                units  = float(pos.get("units", 0) or 0)
+                avg_open = float(pos.get("avgOpenRate", 0) or 0)
+                pnl = float(pos.get("unrealizedPnL", {}).get("pnL", 0) or 0)
+                current_rate = float(pos.get("currentRate", avg_open) or avg_open)
+                if units > 0 and avg_open > 0:
+                    positions.append({
+                        "ticker":      symbol.upper(),
+                        "units":       units,
+                        "avg_open":    avg_open,
+                        "current":     current_rate,
+                        "pnl":         round(pnl, 2),
+                        "pnl_pct":     round((current_rate/avg_open-1)*100, 2) if avg_open > 0 else 0,
+                        "value":       round(units * current_rate, 2),
+                        "cost":        round(units * avg_open, 2),
+                    })
+            except Exception:
+                continue
+        return positions, None
+    except requests.exceptions.Timeout:
+        return None, "eToro API timed out -- try again in a moment."
+    except Exception as e:
+        return None, f"eToro connection error: {str(e)[:80]}"
+
 def tab_portfolio():
     st.markdown("## 💼 My Portfolio")
     st.caption("Your open eToro positions  -  live P&L, stop-loss distances, and AI verdict on each.")

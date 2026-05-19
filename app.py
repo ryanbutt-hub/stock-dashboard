@@ -1821,6 +1821,8 @@ def tab_settings():
             st.session_state.anthropic_key        = ak
             st.session_state.finnhub_key          = fk
             st.session_state["alpha_vantage_key"] = avk
+            save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,
+                      "finnhub_key":fk,"alpha_vantage_key":avk})
             save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,"finnhub_key":fk})
             st.success("✅ Saved permanently!")
 

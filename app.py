@@ -1914,6 +1914,16 @@ def tab_settings():
             st.session_state["alpha_vantage_key"]    = avk
             st.session_state["etoro_public_key"]     = epk
             st.session_state["etoro_user_key"]       = euk
+            save_cfg({
+                "account_size":      acc,
+                "max_risk_pct":      rsk,
+                "anthropic_key":     ak,
+                "finnhub_key":       fk,
+                "alpha_vantage_key": avk,
+                "etoro_public_key":  epk,
+                "etoro_user_key":    euk,
+            })
+            st.success("All settings saved permanently!")
             save_cfg({"account_size":acc,"max_risk_pct":rsk,"anthropic_key":ak,
                       "finnhub_key":fk,"alpha_vantage_key":avk,
                       "etoro_public_key":epk,"etoro_user_key":euk})
